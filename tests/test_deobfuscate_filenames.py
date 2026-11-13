@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -OO
-# Copyright 2007-2021 The SABnzbd-Team <team@sabnzbd.org>
+# Copyright 2007-2026 by The SABnzbd-Team (sabnzbd.org)
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -19,12 +19,21 @@
 Testing SABnzbd deobfuscate module
 """
 
+import os.path
 import random
 import shutil
 import zipfile
 
-from sabnzbd.deobfuscate_filenames import *
-from tests.testhelper import *
+import pytest
+
+from sabnzbd.deobfuscate_filenames import (
+    is_probably_obfuscated,
+    deobfuscate,
+    recover_par2_names,
+    get_biggest_file,
+    deobfuscate_subtitles,
+)
+from tests.testhelper import SAB_CACHE_DIR, SAB_DATA_DIR, make_mock_nzo
 
 
 def create_big_file(filename):
@@ -38,6 +47,7 @@ def create_small_file(filename):
         myfile.truncate(1024)
 
 
+@pytest.mark.usefixtures("clean_cache_dir")
 class TestDeobfuscateFinalResult:
     def test_is_probably_obfuscated(self):
         # Test the base function test_is_probably_obfuscated(), which gives a boolean as RC
@@ -61,6 +71,7 @@ class TestDeobfuscateFinalResult:
         assert is_probably_obfuscated("abc.xyz.a4c567edbcbf27.BLA")  # by definition
         assert is_probably_obfuscated("abc.xyz.iso")  # lazy brother
         assert is_probably_obfuscated("0675e29e9abfd2.f7d069dab0b853283cc1b069a25f82.6547")
+        assert is_probably_obfuscated("[BlaBla] something [More] something b2.bef89a622e4a23f07b0d3757ad5e8a.a0 [Brrr]")
 
         # non-obfuscated names:
         assert not is_probably_obfuscated("/my/blabla/directory/stuff/My Favorite Distro S03E04.iso")
@@ -79,14 +90,20 @@ class TestDeobfuscateFinalResult:
         assert not is_probably_obfuscated("Lorem Ipsum.avi")
         assert not is_probably_obfuscated("Lorem Ipsum")  # no ext
 
+    @staticmethod
+    def deobfuscate_wrapper(filelist, jobname):
+        """Wrapper to avoid the need for NZO"""
+        nzo = make_mock_nzo()
+        deobfuscate(nzo, filelist, jobname)
+
     def test_deobfuscate_filelist_lite(self):
-        # ligthweight test of deobfuscating: with just one file
+        # lightweight test of deobfuscating: with just one file
 
         # Create directory (with a random directory name)
-        dirname = os.path.join(SAB_DATA_DIR, "testdir" + str(random.randint(10000, 99999)))
+        dirname = os.path.join(SAB_CACHE_DIR, "testdir" + str(random.randint(10000, 99999)))
         os.mkdir(dirname)
 
-        # Create a big enough file with a non-useful, obfuscated filename
+        # Create a big file with a useless, obfuscated filename
         output_file1 = os.path.join(dirname, "111c1c9e2bdfb5114044bf25152b7eab.bin")
         create_big_file(output_file1)
         assert os.path.isfile(output_file1)
@@ -96,7 +113,7 @@ class TestDeobfuscateFinalResult:
 
         # and now unleash the magic on that filelist, with a more useful jobname:
         jobname = "My Important Download 2020"
-        deobfuscate_list(myfilelist, jobname)
+        self.deobfuscate_wrapper(myfilelist, jobname)
 
         # Check original files:
         assert not os.path.isfile(output_file1)  # original filename should not be there anymore
@@ -106,22 +123,72 @@ class TestDeobfuscateFinalResult:
         # Done. Remove (non-empty) directory
         shutil.rmtree(dirname)
 
+    def test_deobfuscate_big_file_small_accompanying_files(self):
+        # input: myiso.iso, with accompanying files (.srt and -sample files)
+        # test that the accompanying files (with same basename) are renamed accordingly to the big ISO
+        # Note: this is the most typical usage of deobfuscation
+
+        # Create directory (with a random directory name)
+        dirname = os.path.join(SAB_CACHE_DIR, "testdir" + str(random.randint(10000, 99999)))
+        os.mkdir(dirname)
+
+        # Create a big enough file with a useless filename
+        isofile = os.path.join(dirname, "myiso.iso")
+        create_big_file(isofile)
+        assert os.path.isfile(isofile)
+
+        # and a srt file
+        srtfile = os.path.join(dirname, "myiso.srt")
+        create_small_file(srtfile)
+        assert os.path.isfile(srtfile)
+
+        # and a sample file
+        samplefile = os.path.join(dirname, "myiso-sample.iso")
+        create_small_file(samplefile)
+        assert os.path.isfile(samplefile)
+
+        # and a non-related file
+        txtfile = os.path.join(dirname, "something.txt")
+        create_small_file(txtfile)
+        assert os.path.isfile(txtfile)
+
+        # create the filelist, with just the above files
+        myfilelist = [isofile, srtfile, samplefile, txtfile]
+
+        # and now unleash the magic on that filelist, with a more useful jobname:
+        jobname = "My Important Download 2020"
+        self.deobfuscate_wrapper(myfilelist, jobname)
+
+        # Check original files:
+        assert not os.path.isfile(isofile)  # original iso not be there anymore
+        assert not os.path.isfile(srtfile)  # ... and accompanying file neither
+        assert not os.path.isfile(samplefile)  # ... and this one neither
+        assert os.path.isfile(txtfile)  # should still be there: not accompanying
+
+        # Check the renaming
+        assert os.path.isfile(os.path.join(dirname, jobname + ".iso"))  # ... should be renamed to the jobname
+        assert os.path.isfile(os.path.join(dirname, jobname + ".srt"))  # ... should be renamed to the jobname
+        assert os.path.isfile(os.path.join(dirname, jobname + "-sample.iso"))  # ... should be renamed to the jobname
+
+        # Done. Remove (non-empty) directory
+        shutil.rmtree(dirname)
+
     def test_deobfuscate_filelist_full(self):
         # Full test, with a combinantion of files: Test that deobfuscate() works and renames correctly
         # ... but only the files that are in the filelist
 
         # Create directory (with a random directory name)
-        dirname = os.path.join(SAB_DATA_DIR, "testdir" + str(random.randint(10000, 99999)))
+        dirname = os.path.join(SAB_CACHE_DIR, "testdir" + str(random.randint(10000, 99999)))
         os.mkdir(dirname)
 
-        # Create a big enough file with a non-useful filename
+        # Create a big enough file with a useless filename
         output_file1 = os.path.join(dirname, "111c1c9e2bdfb5114044bf25152b7eaa.bin")
         create_big_file(output_file1)
         assert os.path.isfile(output_file1)
 
-        # and another one
+        # create a small file. Obfuscated, but should not get renamed
         output_file2 = os.path.join(dirname, "222c1c9e2bdfb5114044bf25152b7eaa.bin")
-        create_big_file(output_file2)
+        create_small_file(output_file2)
         assert os.path.isfile(output_file2)
 
         # create the filelist, with just the above files
@@ -138,17 +205,43 @@ class TestDeobfuscateFinalResult:
 
         # and now unleash the magic on that filelist, with a more useful jobname:
         jobname = "My Important Download 2020"
-        deobfuscate_list(myfilelist, jobname)
+        self.deobfuscate_wrapper(myfilelist, jobname)
 
         # Check original files:
         assert not os.path.isfile(output_file1)  # original filename should not be there anymore
-        assert not os.path.isfile(output_file2)  # original filename should not be there anymore
+        assert os.path.isfile(output_file2)  # original smaller file should still be there
         assert os.path.isfile(output_file3)  # but this one should still be there
         assert os.path.isfile(output_file4)  # and this one too
 
         # Check the renaming
         assert os.path.isfile(os.path.join(dirname, jobname + ".bin"))  # ... it should be renamed to the jobname
-        assert os.path.isfile(os.path.join(dirname, jobname + ".1.bin"))  # should be there (2nd file renamed)
+
+        # Done. Remove (non-empty) directory
+        shutil.rmtree(dirname)
+
+    def test_deobfuscate_one_small_file(self):
+        #  Test of deobfuscating: with just one small file
+
+        # Create directory (with a random directory name)
+        dirname = os.path.join(SAB_CACHE_DIR, "testdir" + str(random.randint(10000, 99999)))
+        os.mkdir(dirname)
+
+        # Create a small file with a useless, obfuscated filename
+        output_file1 = os.path.join(dirname, "blabla.txt")
+        create_small_file(output_file1)
+        assert os.path.isfile(output_file1)
+
+        # create the filelist, with just the above file
+        myfilelist = [output_file1]
+
+        # and now unleash the magic on that filelist, with a more useful jobname:
+        jobname = "My Important Download 2020"
+        self.deobfuscate_wrapper(myfilelist, jobname)
+
+        # Check original files:
+        assert not os.path.isfile(output_file1)  # original filename should not be there anymore
+        # Check the renaming
+        assert os.path.isfile(os.path.join(dirname, jobname + ".txt"))  # ... it should be renamed to the jobname
 
         # Done. Remove (non-empty) directory
         shutil.rmtree(dirname)
@@ -157,14 +250,14 @@ class TestDeobfuscateFinalResult:
         # test of deobfuscating with sub directories
 
         # Create directory with subdirs
-        dirname = os.path.join(SAB_DATA_DIR, "testdir" + str(random.randint(10000, 99999)))
+        dirname = os.path.join(SAB_CACHE_DIR, "testdir" + str(random.randint(10000, 99999)))
         os.mkdir(dirname)
         subdirname = os.path.join(dirname, "testdir" + str(random.randint(10000, 99999)))
         os.mkdir(subdirname)
         subsubdirname = os.path.join(subdirname, "testdir" + str(random.randint(10000, 99999)))
         os.mkdir(subsubdirname)
 
-        # Create a big enough file with a non-useful, obfuscated filename
+        # Create a big enough file with a useless, obfuscated filename
         output_file1 = os.path.join(subsubdirname, "111c1c9e2bdfb5114044bf25152b7eab.bin")
         create_big_file(output_file1)
         assert os.path.isfile(output_file1)
@@ -174,7 +267,7 @@ class TestDeobfuscateFinalResult:
 
         # and now unleash the magic on that filelist, with a more useful jobname:
         jobname = "My Important Download 2020"
-        deobfuscate_list(myfilelist, jobname)
+        self.deobfuscate_wrapper(myfilelist, jobname)
 
         # Check original files:
         assert not os.path.isfile(output_file1)  # original filename should not be there anymore
@@ -185,64 +278,40 @@ class TestDeobfuscateFinalResult:
         # Done. Remove (non-empty) directory
         shutil.rmtree(dirname)
 
-    def test_deobfuscate_big_file_small_accompanying_files(self):
-        # input: myiso.iso, with accompanying files (.srt files in this case)
-        # test that the small accompanying files (with same basename) are renamed accordingly to the big ISO
+    def test_no_deobfuscate_DVD_dir(self):
+        # test of typical DVD directory structure ... no deobfuscating should happen
 
-        # Create directory (with a random directory name)
-        dirname = os.path.join(SAB_DATA_DIR, "testdir" + str(random.randint(10000, 99999)))
+        # Create a working directory, with a VIDEO_TS subdirectory
+        dirname = os.path.join(SAB_CACHE_DIR, "testdir" + str(random.randint(10000, 99999)))
         os.mkdir(dirname)
+        subdirname = os.path.join(dirname, "VIDEO_TS")
+        os.mkdir(subdirname)
+        # Create a big file with a useless, obfuscated filename (which normally should get renamed)
+        output_file1 = os.path.join(subdirname, "111c1c9e2bdfb5114044bf25152b7eab.bin")
+        create_big_file(output_file1)
+        assert os.path.isfile(output_file1)
 
-        # Create a big enough file with a non-useful filename
-        isofile = os.path.join(dirname, "myiso.iso")
-        create_big_file(isofile)
-        assert os.path.isfile(isofile)
+        # create the filelist, with just the above file
+        myfilelist = [output_file1]
+        # and now unleash deobfuscate() on that filelist, with a useful jobname:
+        jobname = "My DVD 2021"
+        self.deobfuscate_wrapper(myfilelist, jobname)
 
-        # and a srt file
-        srtfile = os.path.join(dirname, "myiso.srt")
-        create_small_file(srtfile)
-        assert os.path.isfile(srtfile)
-
-        # and a dut.srt file
-        dutsrtfile = os.path.join(dirname, "myiso.dut.srt")
-        create_small_file(dutsrtfile)
-        assert os.path.isfile(dutsrtfile)
-
-        # and a non-related file
-        txtfile = os.path.join(dirname, "something.txt")
-        create_small_file(txtfile)
-        assert os.path.isfile(txtfile)
-
-        # create the filelist, with just the above files
-        myfilelist = [isofile, srtfile, dutsrtfile, txtfile]
-
-        # and now unleash the magic on that filelist, with a more useful jobname:
-        jobname = "My Important Download 2020"
-        deobfuscate_list(myfilelist, jobname)
-
-        # Check original files:
-        assert not os.path.isfile(isofile)  # original iso not be there anymore
-        assert not os.path.isfile(srtfile)  # ... and accompanying file neither
-        assert not os.path.isfile(dutsrtfile)  # ... and this one neither
-        assert os.path.isfile(txtfile)  # should still be there: not accompanying, and too small to rename
-
-        # Check the renaming
-        assert os.path.isfile(os.path.join(dirname, jobname + ".iso"))  # ... should be renamed to the jobname
-        assert os.path.isfile(os.path.join(dirname, jobname + ".srt"))  # ... should be renamed to the jobname
-        assert os.path.isfile(os.path.join(dirname, jobname + ".dut.srt"))  # ... should be renamed to the jobname
+        # ... but because inside "VIDEO_TS" directory, the file should not be touched / renamed:
+        assert os.path.isfile(output_file1)  # should still be there
 
         # Done. Remove (non-empty) directory
         shutil.rmtree(dirname)
 
-    def test_deobfuscate_collection_with_same_extension(self):
-        # input: a collection of 3+ bigger files with the same extension
-        # test that there is no renaming on the collection ... as that's useless on a collection
+    def test_deobfuscate_collection_with_same_size(self):
+        # input: a collection of a few files with about the same size
+        # test that there is no renaming
 
         # Create directory (with a random directory name)
-        dirname = os.path.join(SAB_DATA_DIR, "testdir" + str(random.randint(10000, 99999)))
+        dirname = os.path.join(SAB_CACHE_DIR, "testdir" + str(random.randint(10000, 99999)))
         os.mkdir(dirname)
 
-        # Create big enough files with a non-useful filenames, all with same extension
+        # Create big enough files with a useless filenames, all with same extension
         file1 = os.path.join(dirname, "file1.bin")
         create_big_file(file1)
         assert os.path.isfile(file1)
@@ -259,17 +328,12 @@ class TestDeobfuscateFinalResult:
         create_big_file(file4)
         assert os.path.isfile(file4)
 
-        # other extension ... so this one should get renamed
-        otherfile = os.path.join(dirname, "other.iso")
-        create_big_file(otherfile)
-        assert os.path.isfile(otherfile)
-
         # create the filelist, with the above files
-        myfilelist = [file1, file2, file3, file4, otherfile]
+        myfilelist = [file1, file2, file3, file4]
 
         # and now unleash the magic on that filelist, with a more useful jobname:
         jobname = "My Important Download 2020"
-        deobfuscate_list(myfilelist, jobname)
+        self.deobfuscate_wrapper(myfilelist, jobname)
 
         # Check original files:
         # the collection with same extension should still be there:
@@ -277,11 +341,6 @@ class TestDeobfuscateFinalResult:
         assert os.path.isfile(file2)  # still there
         assert os.path.isfile(file3)  # still there
         assert os.path.isfile(file4)  # still there
-        # but the one separate file with obfuscated name should be renamed:
-        assert not os.path.isfile(otherfile)  # should be renamed
-
-        # Check the renaming
-        assert os.path.isfile(os.path.join(dirname, jobname + ".iso"))  # ... should be renamed to the jobname
 
         # Done. Remove (non-empty) directory
         shutil.rmtree(dirname)
@@ -292,14 +351,14 @@ class TestDeobfuscateFinalResult:
         # non existing file
         myfilelist = ["/bla/bla/notthere.bin"]
         jobname = "My Important Download 2020"
-        deobfuscate_list(myfilelist, jobname)
+        self.deobfuscate_wrapper(myfilelist, jobname)
 
         # Create directory with a directory name that could be renamed, but should not
-        dirname = os.path.join(SAB_DATA_DIR, "333c1c9e2bdfb5114044bf25152b7eaa.bin")
+        dirname = os.path.join(SAB_CACHE_DIR, "333c1c9e2bdfb5114044bf25152b7eaa.bin")
         os.mkdir(dirname)
         myfilelist = [dirname]
         jobname = "My Important Download 2020"
-        deobfuscate_list(myfilelist, jobname)
+        self.deobfuscate_wrapper(myfilelist, jobname)
         assert os.path.exists(dirname)
         shutil.rmtree(dirname)
 
@@ -313,7 +372,7 @@ class TestDeobfuscateFinalResult:
         assert os.path.exists(test_input)
 
         list_of_files = []
-        for (dirpath, dirnames, filenames) in os.walk(test_dir):
+        for dirpath, dirnames, filenames in os.walk(test_dir):
             list_of_files += [os.path.join(dirpath, file) for file in filenames]
         # Run deobfuscate
         recover_par2_names(list_of_files)
@@ -328,7 +387,7 @@ class TestDeobfuscateFinalResult:
 
     def test_deobfuscate_par2_plus_deobfuscate(self):
         # test for first par2 based renaming, then deobfuscate obfuscated names
-        work_dir = os.path.join(SAB_DATA_DIR, "testdir" + str(random.randint(10000, 99999)))
+        work_dir = os.path.join(SAB_CACHE_DIR, "testdir" + str(random.randint(10000, 99999)))
         os.mkdir(work_dir)
 
         source_zip_file = os.path.join(SAB_DATA_DIR, "deobfuscate_par2_based", "20mb_with_par2_package.zip")
@@ -338,17 +397,100 @@ class TestDeobfuscateFinalResult:
         assert os.path.isfile(os.path.join(work_dir, "aaaaaaaaaaa"))  # a 20MB no-name file ...
 
         list_of_files = []
-        for (dirpath, dirnames, filenames) in os.walk(work_dir):
+        for dirpath, dirnames, filenames in os.walk(work_dir):
             list_of_files += [os.path.join(dirpath, file) for file in filenames]
 
         # deobfuscate will do:
         # first par2 based renaming aaaaaaaaaaa to twentymb.bin,
         # then deobfuscate twentymb.bin to the job name (with same extension)
         list_of_files = recover_par2_names(list_of_files)
+        print(list_of_files)
         assert os.path.isfile(os.path.join(work_dir, "twentymb.bin"))  # should exist
 
-        deobfuscate_list(list_of_files, "My Great Download")
+        self.deobfuscate_wrapper(list_of_files, "My Great Download")
         assert os.path.isfile(os.path.join(work_dir, "My Great Download.bin"))  # the twentymb.bin should be renamed
         assert not os.path.isfile(os.path.join(work_dir, "twentymb.bin"))  # should now be gone
 
         shutil.rmtree(work_dir)
+
+    def test_get_biggest_file(self):
+        # Create directory (with a random directory name)
+        dirname = os.path.join(SAB_CACHE_DIR, "testdir" + str(random.randint(10000, 99999)))
+        os.mkdir(dirname)
+
+        smallfile1 = os.path.join(dirname, "AAAA.bin")
+        create_small_file(smallfile1)
+        assert os.path.isfile(smallfile1)
+
+        bigfile = os.path.join(dirname, "KKKK.bin")
+        create_big_file(bigfile)
+        assert os.path.isfile(bigfile)
+
+        smallfile2 = os.path.join(dirname, "LLLL.bin")
+        create_small_file(smallfile2)
+        assert os.path.isfile(smallfile2)
+
+        # empty list should return None
+        assert not get_biggest_file([])
+
+        # just 1 file as input is always the biggest file
+        assert get_biggest_file([smallfile1]) == smallfile1  # just 1 file, so that's the biggest
+
+        # files with same small size, so no biggest file
+        assert not get_biggest_file([smallfile1, smallfile2])
+
+        # now including the bigger file
+        assert get_biggest_file([smallfile1, smallfile2, bigfile]) == bigfile
+
+        shutil.rmtree(dirname)
+
+    def test_deobfuscate_subtitles(self):
+        # input: a big file, and srt file(s), and non-related files
+        # result: srt file renamed according to the big file
+
+        """Wrapper to avoid the need for NZO"""
+        nzo = make_mock_nzo()
+
+        # Create directory (with a random directory name)
+        dirname = os.path.join(SAB_CACHE_DIR, "testdir" + str(random.randint(10000, 99999)))
+        os.mkdir(dirname)
+
+        bigfile = os.path.join(dirname, "bigfile.avi")
+        create_big_file(bigfile)
+        assert os.path.isfile(bigfile)
+
+        already_correct_srt = os.path.join(dirname, "bigfile.srt")
+        create_small_file(already_correct_srt)
+        assert os.path.isfile(already_correct_srt)
+
+        small_srt = os.path.join(dirname, "dut.srt")
+        create_small_file(small_srt)
+        assert os.path.isfile(small_srt)
+        expected_small_srt = os.path.join(dirname, "bigfile.dut.srt")
+
+        small_txt = os.path.join(dirname, "readme.txt")
+        create_small_file(small_txt)
+        assert os.path.isfile(small_txt)
+
+        # go
+        filelist = [bigfile, already_correct_srt, small_srt, small_txt]
+        deobfuscate_subtitles(nzo, filelist)
+
+        assert os.path.isfile(bigfile)  # unchanged
+        assert os.path.isfile(already_correct_srt)  # unchanged
+        assert not os.path.isfile(small_srt)  # should be renamed to:
+        assert os.path.isfile(expected_small_srt)
+        assert os.path.isfile(small_txt)  # unchanged
+        # the list should track the renamed file
+        assert filelist == [bigfile, already_correct_srt, expected_small_srt, small_txt]
+
+        # and if we go again ... nothing should happen: all files are already correct
+        deobfuscate_subtitles(nzo, [bigfile, already_correct_srt, expected_small_srt, small_txt])
+
+        assert os.path.isfile(bigfile)  # unchanged
+        assert os.path.isfile(already_correct_srt)  # unchanged
+        assert not os.path.isfile(small_srt)  # should be renamed to:
+        assert os.path.isfile(expected_small_srt)
+        assert os.path.isfile(small_txt)  # unchanged
+
+        shutil.rmtree(dirname)

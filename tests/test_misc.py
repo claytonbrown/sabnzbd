@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -OO
-# Copyright 2007-2021 The SABnzbd-Team <team@sabnzbd.org>
+# Copyright 2007-2026 by The SABnzbd-Team (sabnzbd.org)
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -19,18 +19,49 @@
 tests.test_misc - Testing functions in misc.py
 """
 
+import builtins
 import datetime
+import functools
+import logging
+import os
+import socket
 import subprocess
 import sys
 import tempfile
+import wave
+from contextlib import ExitStack, contextmanager, nullcontext
+from functools import cached_property
+from random import randint, sample
+from typing import Optional
 from unittest import mock
 
-from sabnzbd import lang
-from sabnzbd import misc
-from sabnzbd import newsunpack
-from sabnzbd.config import ConfigCat
-from sabnzbd.constants import HIGH_PRIORITY, FORCE_PRIORITY, DEFAULT_PRIORITY, NORMAL_PRIORITY
-from tests.testhelper import *
+import pytest
+import rarfile
+
+from sabnzbd import lang, misc, newsunpack, cfg
+from sabnzbd.config import ConfigCat, get_sorters, save_config
+from sabnzbd.constants import (
+    DEFAULT_PRIORITY,
+    FORCE_PRIORITY,
+    GUESSIT_SORT_TYPES,
+    HIGH_PRIORITY,
+    NORMAL_PRIORITY,
+)
+from sabnzbd.misc import SABRarFile
+from tests.testhelper import SAB_BASE_DIR
+
+
+@pytest.fixture
+def reset_language(compiled_language_files, monkeypatch):
+    """Provide a compiled-translations environment for a test and guarantee the global
+    translation state is restored on teardown"""
+    monkeypatch.setattr(lang, "_DOMAIN", lang._DOMAIN)
+    monkeypatch.setattr(lang, "_LOCALEDIR", lang._LOCALEDIR)
+    monkeypatch.setitem(builtins.__dict__, "T", builtins.__dict__.get("T"))
+    monkeypatch.setitem(builtins.__dict__, "TT", builtins.__dict__.get("TT"))
+    yield compiled_language_files
+    # Reset to the default (English) translators regardless of what the test selected
+    lang.set_language()
 
 
 class TestMisc:
@@ -43,9 +74,9 @@ class TestMisc:
         assert "%H:%M:%S" == misc.time_format("%H:%M:%S")
         assert "%H:%M" == misc.time_format("%H:%M")
 
-    @set_config({"ampm": True})
-    def test_timeformatampm(self):
-        misc.HAVE_AMPM = True
+    @pytest.mark.config({"ampm": True})
+    def test_timeformatampm(self, monkeypatch):
+        monkeypatch.setattr(misc, "HAVE_AMPM", True)
         assert "%I:%M:%S %p" == misc.time_format("%H:%M:%S")
         assert "%I:%M %p" == misc.time_format("%H:%M")
 
@@ -62,10 +93,62 @@ class TestMisc:
         assert "all caps" == misc.safe_lower("ALL CAPS")
         assert "" == misc.safe_lower(None)
 
+    def test_is_none(self):
+        assert misc.is_none(None) is True
+        assert misc.is_none(0) is True
+        assert misc.is_none(False) is True
+        assert misc.is_none("None") is True
+        assert misc.is_none("nOne") is True
+
+        assert misc.is_none(True) is False
+        assert misc.is_none(1) is False
+        assert misc.is_none(True) is False
+        assert misc.is_none("Not None") is False
+
+    def test_clean_comma_separated_list(self):
+        assert misc.clean_comma_separated_list("") == []
+        assert misc.clean_comma_separated_list(None) == []
+        assert misc.clean_comma_separated_list(123) == []
+        assert misc.clean_comma_separated_list("a,b") == ["a", "b"]
+        assert misc.clean_comma_separated_list(",b") == ["b"]
+        assert misc.clean_comma_separated_list("   a  ,  b  ") == ["a", "b"]
+        assert misc.clean_comma_separated_list(["a  ", "  b", ""]) == ["a", "b"]
+
     def test_cmp(self):
         assert misc.cmp(1, 2) < 0
         assert misc.cmp(2, 1) > 0
         assert misc.cmp(1, 1) == 0
+
+    @pytest.mark.parametrize(
+        "cat, pp, script, expected",
+        [
+            (None, None, None, (None, None, None)),
+            ("", "", "", (None, None, None)),
+            ("none", "-1", "default", (None, None, None)),
+            ("SomeCategory", "1", "SomeScript", ("SomeCategory", 1, "SomeScript")),
+            ("none", 0, "default", (None, 0, None)),
+            ("Movies", "", "default", ("Movies", None, None)),
+            ("none", 0, "Default", (None, 0, None)),
+            ("other", "-1", "Default", ("other", None, None)),
+            ("none", "None", "default", (None, None, None)),
+            ("some", "none", "script", ("some", None, "script")),
+            ("none", "NONE", "Default", (None, None, None)),
+            # pp must be a PP_LOOKUP key or None
+            ("none", "2", "default", (None, 2, None)),
+            ("none", 3, "default", (None, 3, None)),
+            # Out-of-range ints are invalid
+            ("", "10", "default", (None, None, None)),
+            ("none", "15", "", (None, None, None)),
+            ("none", 4, "default", (None, None, None)),
+            # Non-numeric never passes as a string
+            ("none", "-c", "default", (None, 0, None)),
+            ("none", "echo pwned", "default", (None, 0, None)),
+            ("none", "2; rm -rf /", "default", (None, 0, None)),
+            ("none", "1.5", "default", (None, 0, None)),
+        ],
+    )
+    def test_cat_pp_script_sanitizer(self, cat, pp, script, expected):
+        assert misc.cat_pp_script_sanitizer(cat, pp, script) == expected
 
     def test_cat_to_opts(self):
         # Need to create the Default category, as we would in normal instance
@@ -117,21 +200,58 @@ class TestMisc:
         assert 1125899906842624.0 == misc.from_units("1P")
 
     def test_to_units(self):
+        assert "" == misc.to_units("foobar")
         assert "1 K" == misc.to_units(1024)
         assert "1 KBla" == misc.to_units(1024, postfix="Bla")
         assert "1.0 M" == misc.to_units(1024 * 1024)
         assert "1.0 M" == misc.to_units(1024 * 1024 + 10)
+        assert "-1.0 M" == misc.to_units(-1024 * 1024)
         assert "10.0 M" == misc.to_units(1024 * 1024 * 10)
         assert "100.0 M" == misc.to_units(1024 * 1024 * 100)
         assert "9.8 G" == misc.to_units(1024 * 1024 * 10000)
-        assert "1024.0 P" == misc.to_units(1024 ** 6)
+        assert "1024.0 P" == misc.to_units(1024**6)
+
+        # Values that round up to the next unit should be shown in that unit
+        assert "1023 K" == misc.to_units(1024**2 - 1024)
+        assert "1.0 M" == misc.to_units(1024**2 - 1)
+        assert "-1.0 M" == misc.to_units(-(1024**2 - 1))
+        assert "1.0 MBla" == misc.to_units(1024**2 - 1, postfix="Bla")
+        assert "1023.9 M" == misc.to_units(1024**3 - 1024**2 // 8)
+        assert "1.0 G" == misc.to_units(1024**3 - 1)
+        assert "1.0 T" == misc.to_units(1024**4 - 1)
+        assert "1.0 P" == misc.to_units(1024**5 - 1)
 
     def test_unit_back_and_forth(self):
         assert 100 == misc.from_units(misc.to_units(100))
         assert 1024 == misc.from_units(misc.to_units(1024))
-        assert 1024 ** 3 == misc.from_units(misc.to_units(1024 ** 3))
+        assert 1024**3 == misc.from_units(misc.to_units(1024**3))
+
+        # Negative numbers are not supported
+        assert 100 == misc.from_units(misc.to_units(-100))
 
     def test_caller_name(self):
+        def set_config(settings_dict):
+            """Change config-values on the fly, per test"""
+
+            def set_config_decorator(func):
+                @functools.wraps(func)
+                def wrapper_func(*args, **kwargs):
+                    # Setting up as requested
+                    for item, val in settings_dict.items():
+                        getattr(cfg, item).set(val)
+
+                    # Perform test
+                    value = func(*args, **kwargs)
+
+                    # Reset values
+                    for item in settings_dict:
+                        getattr(cfg, item).set(getattr(cfg, item).default)
+                    return value
+
+                return wrapper_func
+
+            return set_config_decorator
+
         @set_config({"log_level": 0})
         def test_wrapper(skip):
             return misc.caller_name(skip=skip)
@@ -158,7 +278,18 @@ class TestMisc:
         assert ("[::1]", 1234) == misc.split_host("[::1]:1234")
         assert ("[2001:db8::8080]", None) == misc.split_host("[2001:db8::8080]")
 
-    @set_config({"cleanup_list": [".exe", ".nzb"]})
+    def test_get_base_url(self):
+        assert "example.com" == misc.get_base_url("api.example.com")
+        assert "example.co.uk" == misc.get_base_url("https://api.example.co.uk")
+        assert "localhost" == misc.get_base_url("localhost")
+        # Malformed input never raises, just yields ""
+        assert "" == misc.get_base_url("[]")
+        assert "" == misc.get_base_url("[bad]")
+        assert "" == misc.get_base_url("a[b]c")
+        # A scheme with no netloc doesn't invent a hostname out of the scheme itself
+        assert "" == misc.get_base_url("http://")
+
+    @pytest.mark.config({"cleanup_list": [".exe", ".nzb"]})
     def test_on_cleanup_list(self):
         assert misc.on_cleanup_list("test.exe")
         assert misc.on_cleanup_list("TEST.EXE")
@@ -167,6 +298,60 @@ class TestMisc:
         assert misc.on_cleanup_list("test.nzb")
         assert not misc.on_cleanup_list("test.nzb", skip_nzb=True)
         assert not misc.on_cleanup_list("test.exe.lnk")
+
+    @pytest.mark.config({"cleanup_list": ["Thumbs.db"]})
+    def test_on_cleanup_list_exact_filenames(self):
+        # Exact filename matching (case-insensitive)
+        assert misc.on_cleanup_list("Thumbs.db")
+        assert misc.on_cleanup_list("thumbs.db")
+        assert misc.on_cleanup_list("THUMBS.DB")
+        assert not misc.on_cleanup_list("Thumbs.db.bak")
+        assert not misc.on_cleanup_list("not_thumbs.db")
+
+    @pytest.mark.config({"cleanup_list": ["*.tmp", "cleanup.*"]})
+    def test_on_cleanup_list_wildcard_patterns(self):
+        # Wildcard filename patterns
+        assert misc.on_cleanup_list("file.tmp")
+        assert misc.on_cleanup_list("temp.tmp")
+        assert misc.on_cleanup_list("FILE.TMP")
+        assert not misc.on_cleanup_list("file.tmp.bak")
+        assert misc.on_cleanup_list("cleanup.log")
+        assert misc.on_cleanup_list("cleanup.txt")
+        assert misc.on_cleanup_list("CLEANUP.LOG")
+        assert not misc.on_cleanup_list("cleanup")
+
+    # cleanup_list is always lowercased by validator
+    @pytest.mark.config({"cleanup_list": ["images/*", "*/test.jpg", "cache/*.log", "deep/*/pic.png", "temp\\*.tmp"]})
+    def test_on_cleanup_list_path_patterns(self):
+        # Path patterns with relative paths
+        assert misc.on_cleanup_list("file.jpg", relative_path="images/file.jpg")
+        assert misc.on_cleanup_list("pic.png", relative_path="images/pic.png")
+        assert not misc.on_cleanup_list("file.jpg", relative_path="file.jpg")
+        assert misc.on_cleanup_list("test.jpg", relative_path="subfolder/test.jpg")
+        assert misc.on_cleanup_list("test.jpg", relative_path="deep/nested/test.jpg")
+        assert not misc.on_cleanup_list("other.jpg", relative_path="subfolder/other.jpg")
+        assert misc.on_cleanup_list("error.log", relative_path="cache/error.log")
+        assert not misc.on_cleanup_list("error.log", relative_path="logs/error.log")
+        # Case-insensitive path matching
+        assert misc.on_cleanup_list("file.jpg", relative_path="IMAGES/file.jpg")
+        # Wildcard with paths: deep/*/pic.png uses fnmatch which treats * as matching any chars including /
+        assert misc.on_cleanup_list("pic.png", relative_path="deep/nested/pic.png")
+        assert misc.on_cleanup_list("pic.png", relative_path="deep/nested/subfolder/pic.png")
+        # Cross-platform: patterns with backslashes in config are normalized at match time
+        # temp\*.tmp pattern should match temp/file.tmp
+        assert misc.on_cleanup_list("file.tmp", relative_path="temp/file.tmp")
+        # Cross-platform: relative paths with backslashes (from os.path.relpath on Windows)
+        # should also work with forward slash patterns
+        assert misc.on_cleanup_list("pic.png", relative_path="deep\\nested\\pic.png")
+
+    # cleanup_list is always lowercased by validator
+    @pytest.mark.config({"cleanup_list": ["exe", "thumbs.db", "*.tmp"]})
+    def test_on_cleanup_list_mixed(self):
+        # Mixed list of extensions, filenames, and patterns
+        assert misc.on_cleanup_list("test.exe")
+        assert misc.on_cleanup_list("Thumbs.db")
+        assert misc.on_cleanup_list("temp.tmp")
+        assert not misc.on_cleanup_list("test.txt")
 
     def test_format_time_string(self):
         assert "0 seconds" == misc.format_time_string(None)
@@ -179,12 +364,8 @@ class TestMisc:
         assert "1 day 59 seconds" == misc.format_time_string(86400 + 59)
         assert "2 days 2 hours 2 seconds" == misc.format_time_string(2 * 86400 + 2 * 60 * 60 + 2)
 
-    def test_format_time_string_locale(self):
-        # Have to set the languages, if it was compiled
-        locale_dir = os.path.join(SAB_BASE_DIR, "..", sabnzbd.constants.DEF_LANGUAGE)
-        if not os.path.exists(locale_dir):
-            pytest.mark.skip("No language files compiled")
-
+    def test_format_time_string_locale(self, reset_language):
+        locale_dir = reset_language
         lang.set_locale_info("SABnzbd", locale_dir)
         lang.set_language("de")
         assert "1 Sekunde" == misc.format_time_string(1)
@@ -194,6 +375,52 @@ class TestMisc:
         assert "1 Tag 59 Sekunden" == misc.format_time_string(86400 + 59)
         assert "2 Tage 2 Stunden 2 Sekunden" == misc.format_time_string(2 * 86400 + 2 * 60 * 60 + 2)
 
+    def test_format_time_left(self):
+        assert "0:00:00" == misc.format_time_left(0)
+        assert "0:00:00" == misc.format_time_left(-1)
+        assert "0:00:01" == misc.format_time_left(1)
+        assert "0:01:01" == misc.format_time_left(60 + 1)
+        assert "0:11:10" == misc.format_time_left(60 * 11 + 10)
+        assert "3:11:10" == misc.format_time_left(60 * 60 * 3 + 60 * 11 + 10)
+        assert "13:11:10" == misc.format_time_left(60 * 60 * 13 + 60 * 11 + 10)
+        assert "1:09:11:10" == misc.format_time_left(60 * 60 * 33 + 60 * 11 + 10)
+
+    def test_format_time_left_short(self):
+        assert "0:00" == misc.format_time_left(0, short_format=True)
+        assert "0:01" == misc.format_time_left(1, short_format=True)
+        assert "1:01" == misc.format_time_left(60 + 1, short_format=True)
+        assert "11:10" == misc.format_time_left(60 * 11 + 10, short_format=True)
+        assert "3:11:10" == misc.format_time_left(60 * 60 * 3 + 60 * 11 + 10, short_format=True)
+        assert "13:11:10" == misc.format_time_left(60 * 60 * 13 + 60 * 11 + 10, short_format=True)
+        assert "1:09:11:10" == misc.format_time_left(60 * 60 * 33 + 60 * 11 + 10, short_format=True)
+
+    @pytest.mark.parametrize(
+        "value, default, expected, description",
+        [
+            (None, "", "", "Test with None value and default empty string"),
+            (None, "default", "default", "Test with None value and default 'default'"),
+            (0, "", "0", "Test with zero value"),
+            (1, "", "1", "Test with one value"),
+            (-1, "", "-1", "Test with negative one value"),
+            (100, "", "100", "Test with 100 value"),
+            ("abc", "", "abc", "Test with alphabetic string"),
+            ("", "", "", "Test with empty string"),
+            (True, "", "True", "Test with boolean True value"),
+            (False, "", "False", "Test with boolean False value"),
+            (0.0, "", "0.0", "Test with float zero value"),
+            (1.5, "", "1.5", "Test with positive float value"),
+            (-2.7, "", "-2.7", "Test with negative float value"),
+            (complex(1, 1), "", "(1+1j)", "Test with complex number"),
+            ([], "", "[]", "Test with empty list"),
+            ([1, 2, 3], "", "[1, 2, 3]", "Test with list of integers"),
+            ({}, "", "{}", "Test with empty dictionary"),
+            ({"key": "value"}, "", "{'key': 'value'}", "Test with dictionary"),
+            (set(), "", "set()", "Test with empty set"),
+        ],
+    )
+    def test_str_conv(self, value, default, expected, description):
+        assert misc.str_conv(value, default) == expected
+
     def test_int_conv(self):
         assert 0 == misc.int_conv("0")
         assert 10 == misc.int_conv("10")
@@ -202,6 +429,32 @@ class TestMisc:
         assert 0 == misc.int_conv(None)
         assert 1 == misc.int_conv(True)
         assert 0 == misc.int_conv(object)
+
+    @pytest.mark.parametrize(
+        "value, expected, description",
+        [
+            (None, False, "Test with None value"),
+            (0, False, "Test with zero value"),
+            ("0", False, "Test with zero string"),
+            (1, True, "Test with one value"),
+            (-1, True, "Test with negative one value"),
+            (100, True, "Test with 100 value"),
+            ("1", True, "Test with one string"),
+            ("100", True, "Test with 100 string"),
+            ("", False, "Test with empty string"),
+            ("abc", False, "Test with non-numeric string"),
+            ("true", False, "Test with 'true' string"),
+            (True, True, "Test with boolean True value"),
+            (False, False, "Test with boolean False value"),
+            (0.0, False, "Test with float zero value"),
+            (1.5, True, "Test with positive float value"),
+            (-2.7, True, "Test with negative float value"),
+            ("1.5", False, "Test with float string value"),
+            ("0.0", False, "Test with float zero string value"),
+        ],
+    )
+    def test_bool_conv(self, value, expected, description):
+        assert misc.bool_conv(value) == expected, description
 
     def test_create_https_certificates(self):
         cert_file = "test.cert"
@@ -249,8 +502,121 @@ class TestMisc:
         ],
     )
     def test_is_sample_known_false_positives(self, name, result):
-        """We know these fail, but don't have a better solution for them at the moment."""
+        """These cannot be resolved by name alone; they are handled by inspecting
+        the actual media duration when the file is available (see #2083 tests below)."""
         assert misc.is_sample(name) != result
+
+    @staticmethod
+    def _write_wav(path: str, seconds: float):
+        """Create a real WAV file of the given length (pure Python, no external tools)"""
+        framerate = 8000
+        with wave.open(path, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(framerate)
+            wav.writeframes(b"\x00\x00" * int(framerate * seconds))
+
+    def test_get_media_duration(self, tmp_path):
+        wav_file = os.path.join(tmp_path, "tone.wav")
+        self._write_wav(wav_file, 2.5)
+        assert misc.get_media_duration(wav_file) == pytest.approx(2.5, abs=0.1)
+
+        # Not a media file and a non-existent file both yield no duration
+        not_media = os.path.join(tmp_path, "notmedia.bin")
+        with open(not_media, "wb") as fp:
+            fp.write(b"this is not a media file")
+        assert misc.get_media_duration(not_media) is None
+        assert misc.get_media_duration(os.path.join(tmp_path, "does_not_exist.mkv")) is None
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Not Death Proof (2022) 1080p x264 (DD5.1) BE Subs.mkv",
+            "Proof.of.Everything.(2042).4320p.x266-4U.mkv",
+            "Crime_Scene_S01E13_Free_Sample_For_Sale_480p-OhDear.mp4",
+            "Sample That 2011 480p WEB-DL.H265-aMiGo.avi",
+        ],
+    )
+    def test_is_sample_long_media_not_a_sample(self, name, tmp_path, monkeypatch):
+        """Real content whose title contains 'sample'/'proof' must not be flagged as
+        a sample once the actual (long) media file is available on disk (#2083)."""
+        media_file = os.path.join(tmp_path, name)
+        self._write_wav(media_file, 2.0)
+        # Treat anything over 1s as "long" so the short test file counts as real content
+        monkeypatch.setattr(misc, "SAMPLE_MAX_DURATION", 1)
+        # The name alone still trips the detector...
+        assert misc.is_sample(name) is True
+        # ...but with the real (long) file on disk it is correctly kept
+        assert misc.is_sample(media_file) is False
+
+    def test_is_sample_short_media_still_a_sample(self, tmp_path):
+        """A genuinely short media file matching the sample pattern stays a sample"""
+        media_file = os.path.join(tmp_path, "Something.1080p.H264-EMRG-sample.avi")
+        self._write_wav(media_file, 2.0)
+        assert misc.is_sample(media_file) is True
+
+    def test_is_sample_unanalysable_file_falls_back_to_name(self, tmp_path):
+        """When the file cannot be analysed, fall back to the name-based result"""
+        non_media = os.path.join(tmp_path, "file-sample.mkv")
+        with open(non_media, "wb") as fp:
+            fp.write(b"not really an mkv")
+        assert misc.is_sample(non_media) is True
+        # A non-sample name is never a sample, regardless of the file on disk
+        assert misc.is_sample(os.path.join(tmp_path, "regular-movie.mkv")) is False
+
+    @pytest.mark.parametrize(
+        "name, ext",
+        [
+            ("Show.S01E01.proof", ".rar"),
+            ("Movie.2023.sample", ".zip"),
+            ("Release-sample", ".nzb"),
+            ("Release-proof", ".gz"),
+        ],
+    )
+    def test_is_sample_archive_or_nzb_skips_media_check(self, name, ext, tmp_path, monkeypatch):
+        """Archive and NZB files must be classified by name only; get_media_duration
+        must never be called for them (fixes AttributeError on proof rarsets, #3641).
+        We create the file on disk so that os.path.isfile() returns True, which would
+        otherwise trigger the media-duration path without the fix."""
+        path = os.path.join(tmp_path, name + ext)
+        with open(path, "wb") as fp:
+            fp.write(b"\x00" * 16)
+        called = []
+        monkeypatch.setattr(misc, "get_media_duration", lambda _: called.append(True) or None)
+        result = misc.is_sample(path)
+        assert result is True
+        assert not called, "get_media_duration should not be called for archive/NZB files"
+
+    def test_get_media_duration_metadata_none(self, tmp_path, monkeypatch):
+        """extractMetadata returning None must not raise AttributeError; the function
+        must return None gracefully and must NOT fall into the exception-handler path
+        (fixes #3641). Without the fix, None.get() raises AttributeError which is
+        caught by the broad except, leaving a 'Failed to read media duration' debug
+        log. With the fix the walrus short-circuits cleanly and no exception occurs."""
+        dummy = os.path.join(tmp_path, "proof.bin")
+        with open(dummy, "wb") as fp:
+            fp.write(b"\x00" * 16)
+
+        import hachoir.parser as _hp
+        import hachoir.metadata as _hm
+
+        fake_parser = mock.MagicMock()
+        fake_parser.__enter__ = lambda s: s
+        fake_parser.__exit__ = mock.MagicMock(return_value=False)
+        monkeypatch.setattr(_hp, "createParser", lambda _: fake_parser)
+        monkeypatch.setattr(_hm, "extractMetadata", lambda _: None)
+
+        # The function must return None without entering the except-handler path.
+        # Verify by ensuring the "Failed to read media duration" debug message is
+        # never emitted (it is only reached when an exception is caught).
+        with mock.patch.object(misc.logging, "debug") as mock_debug:
+            result = misc.get_media_duration(dummy)
+
+        assert result is None
+        failure_calls = [c for c in mock_debug.call_args_list if "Failed to read" in str(c)]
+        assert (
+            not failure_calls
+        ), "AttributeError was raised (extractMetadata returned None but .get() was called on it)"
 
     @pytest.mark.parametrize(
         "test_input, expected_output",
@@ -259,14 +625,30 @@ class TestMisc:
             (["", "cmd1", "5"], '"" "cmd1" "5"'),  # sending blank string
             (["cmd1", None, "cmd3", "tail -f"], '"cmd1" "" "cmd3" "tail -f"'),  # sending None in command
             (["cmd1", 0, "ps ux"], '"cmd1" "" "ps ux"'),  # sending 0
+            (['pass"word', "command"], '"pass""word" "command"'),  # special escaping of unrar
         ],
     )
-    def test_list_to_cmd(self, test_input, expected_output):
+    def test_list2cmdline_unrar(self, test_input, expected_output):
         """Test to convert list to a cmd.exe-compatible command string"""
-
-        res = misc.list2cmdline(test_input)
+        res = misc.list2cmdline_unrar(test_input)
         # Make sure the output is cmd.exe-compatible
         assert res == expected_output
+
+    def test_recursive_html_escape(self):
+        """Very basic test if the recursive clean-up works"""
+        input_test = {
+            "foo": "<b>?ar'\"",
+            "test_list": ["test&1", 'test"2'],
+            "test_nested_list": [["test&1", 'test"2', 4]],
+            "test_dict": {"test": ["test<>1", "#"]},
+        }
+        # Dict is updated in-place
+        misc.recursive_html_escape(input_test)
+        # Have to check them by hand
+        assert input_test["foo"] == "&lt;b&gt;?ar&#x27;&quot;"
+        assert input_test["test_list"] == ["test&amp;1", "test&quot;2"]
+        assert input_test["test_nested_list"] == [["test&amp;1", "test&quot;2", 4]]
+        assert input_test["test_dict"]["test"] == ["test&lt;&gt;1", "#"]
 
     @pytest.mark.parametrize(
         "value, result",
@@ -422,10 +804,89 @@ class TestMisc:
             ("::ffff:192.168.1.100", True),
             ("::ffff:1.1.1.1", False),
             ("::ffff:127.0.0.1", False),
+            ("100.64.0.1", False),  # Shared address space (CGNAT), not a local network
+            # ipaddress.is_private covers all of these, but none is a local network:
+            ("2002::1", False),  # 6to4, globally routable
+            ("2001::1", False),  # Teredo
+            ("203.0.113.5", False),  # TEST-NET-3
+            ("192.0.2.5", False),  # TEST-NET-1
+            ("198.51.100.5", False),  # TEST-NET-2
+            ("198.18.0.5", False),  # Benchmarking
+            ("240.0.0.1", False),  # Reserved
+            ("0.1.2.3", False),  # "This network"
+            ("2001:db8::1", False),  # Documentation
         ],
     )
     def test_is_lan_addr(self, value, result):
         assert misc.is_lan_addr(value) is result
+
+    @pytest.mark.parametrize(
+        "value, local_ranges, result",
+        [
+            ("10.11.12.13", None, True),
+            ("172.16.2.81", None, True),
+            ("192.168.255.255", None, True),
+            ("169.254.42.42", None, True),  # Link-local
+            ("fd00::ffff", None, True),  # Part of fc00::/7, IPv6 "Unique Local Addresses"
+            ("fe80::a1", None, True),  # IPv6 Link-local
+            ("::1", None, False),
+            ("localhost", None, False),
+            ("127.0.0.1", None, False),
+            ("2001:1337:babe::", None, False),
+            ("172.32.32.32", None, False),  # Near but not part of 172.16.0.0/12
+            ("100.64.0.1", None, False),  # Test net
+            ("[2001::1]", None, False),
+            ("::", None, False),
+            ("::a:b:c", None, False),
+            ("1.2.3.4", None, False),
+            ("255.255.255.255", None, False),
+            ("0.0.0.0", None, False),
+            ("127.0.0.1", None, False),
+            ("400.500.600.700", None, False),
+            ("blabla", None, False),
+            (-666, None, False),
+            ("example.org", None, False),
+            (None, None, False),
+            ("", None, False),
+            ("[1.2.3.4]", None, False),
+            ("2001:1", None, False),
+            ("2001::[2001::1]", None, False),
+            ("::ffff:192.168.1.100", None, True),
+            ("::ffff:1.1.1.1", None, False),
+            ("::ffff:127.0.0.1", None, False),
+            ("10.11.12.13", "10.0.0.0/8", True),
+            ("10.11.12.13", "12.34.56.78, 10.0.0.0/8", True),
+            ("10.11.12.13", "10.0.0.0/24", False),
+            ("172.16.2.81", "10.0.0.0/24", False),
+            ("192.168.255.255", "2001::/64", False),
+            ("2001:1337:babe::42", "2001:1337:babe::/48", True),
+            ("2001:1337:babe::11", "1002:1337:babe::/48", False),
+            ("2001:1337:babe::", "2001:1337:babe::/16", False),  # Invalid local range
+            ("2001:1337:babe::", "1002:1337:babe::/8", False),  # Idem
+            ("2001::1", "2001::/2", False),
+            ("::", "1.2.3.0/26, 9.8.7.6", False),
+            ("::a:b:c", "1.2.3.0/26, 9.8.7.6", False),
+            ("1.2.3.4", "1.2.3.0/24, 9.8.7.6", True),
+            ("1.2.3.4", "1.2.3.4/32, 9.8.7.6", True),
+            ("1.2.3.4", "9.8.7.6, 1.2.3.4/32", True),
+            ("1.2.3.4", "ffff:1234::/128, 1.2.3.4/32, 9.8.7.6", True),
+            ("ffff:1234::0", "ffff:1234::/128, 1.2.3.4/32, 9.8.7.6", True),
+            ("EEEE::ccc", "ffff:1234::/128, 1.2.3.4/32, 9.8.7.6", False),
+            ("FFFFFFFF:1234::0", "ffff:1234::/128, 1.2.3.4/32, 9.8.7.6", False),
+            ("1.2.3.4", "1.2.3.3/32, 9.8.7.6", False),
+            ("1.2.3.4", "1.2.3.5/32, 9.8.7.6", False),
+        ],
+    )
+    @pytest.mark.config(
+        lambda params: {
+            "local_ranges": params["local_ranges"],
+        }
+    )
+    def test_is_local_addr(self, value, local_ranges, result):
+        def _func():
+            assert misc.is_local_addr(value) is result
+
+        _func()
 
     @pytest.mark.parametrize(
         "ip, subnet, result",
@@ -457,7 +918,8 @@ class TestMisc:
             ("108.1.2.3", "10", False),  # This used to be allowed with the bad setting!
             ("108.1.2.3", "10.", False),
             ("192.168.43.21", "192.168.0.0/16", True),
-            ("192.168.43.21", "192.168.0.0/255.255.255.0", True),
+            ("192.168.43.21", "192.168.43.0/255.255.255.0", True),  # Netmask form of /24
+            ("192.168.43.21", "192.168.0.0/255.255.255.0", False),  # Netmask form of a /24 that excludes it
             ("::ffff:192.168.43.21", "192.168.43.0/24", True),  # IPv4-mapped IPv6 ("dual-stack") notation
             ("::FFff:192.168.43.21", "192.168.43.0/24", True),
             ("::ffff:192.168.12.34", "192.168.43.0/24", False),
@@ -488,7 +950,74 @@ class TestMisc:
         ],
     )
     def test_ip_in_subnet(self, ip, subnet, result):
-        misc.ip_in_subnet(ip, subnet) is result
+        assert misc.ip_in_subnet(ip, subnet) is result
+
+    @pytest.mark.parametrize(
+        "ranges, result",
+        [
+            # Nothing configured means the whole private address space
+            ([], misc.LAN_RANGES),
+            (None, misc.LAN_RANGES),
+            # Narrower than a private range, so the narrower one is the overlap
+            (["192.168.1.0/24"], ["192.168.1.0/24"]),
+            (["192.168.1."], ["192.168.1.0/24"]),  # Old-style entry
+            (["fd00::/8"], ["fd00::/8"]),
+            # Wider than a private range, so the private range is the overlap
+            (["10.0.0.0/7"], ["10.0.0.0/8"]),
+            # Public ranges have no overlap at all
+            (["8.8.8.0/24"], []),
+            (["dead:beef::/32"], []),
+            (["not-a-network"], []),
+            # A mixture keeps only the part that is private
+            (["192.168.1.0/24", "8.8.8.0/24"], ["192.168.1.0/24"]),
+        ],
+    )
+    def test_lan_ranges_within(self, ranges, result):
+        assert misc.lan_ranges_within(ranges) == result
+
+    @pytest.mark.parametrize(
+        "ranges, expected_warning",
+        [
+            (["100.64.0.0/10"], "not a private network"),
+            (["8.8.8.0/24"], "not a private network"),
+            (["nonsense"], "Ignoring invalid entry"),
+            # Nothing to say about a range that is kept
+            (["192.168.1.0/24"], None),
+        ],
+    )
+    def test_lan_ranges_within_says_what_it_dropped(self, ranges, expected_warning, caplog):
+        """A dropped range silently stops conferring forwarded-header trust, so the proxy
+        living in it starts being refused with nothing at start-up to explain why."""
+        with caplog.at_level(logging.WARNING):
+            misc.lan_ranges_within(ranges)
+        messages = [record.getMessage() for record in caplog.records]
+        if expected_warning:
+            assert any(expected_warning in message and ranges[0] in message for message in messages)
+        else:
+            assert not messages
+
+    @pytest.mark.parametrize(
+        "subnet, result",
+        [
+            ("192.168.1.0/24", "192.168.1.0/24"),  # Already canonical
+            ("192.168.1.", "192.168.1.0/24"),  # Old local_ranges style
+            ("192.168.1", "192.168.1.0/24"),
+            ("10", "10.0.0.0/8"),
+            ("10.42.0.0/255.255.0.0", "10.42.0.0/16"),  # Netmask form
+            ("192.168.1.5", "192.168.1.5/32"),  # Bare address
+            ("::1", "::1/128"),
+            ("FC00::/7", "fc00::/7"),  # Canonicalised
+            ("2001:db8:", "2001:db8::/32"),
+            ("192.168.1.5/24", None),  # Host bits set, ip_in_subnet() never matched this
+            ("not-a-network", None),
+            ("654.3.2.1/24", None),
+            ("", None),
+            (None, None),
+        ],
+    )
+    def test_parse_subnet(self, subnet, result):
+        network = misc.parse_subnet(subnet)
+        assert (str(network) if network else None) == result
 
     @pytest.mark.parametrize(
         "ip, result",
@@ -498,7 +1027,7 @@ class TestMisc:
             ("::ffff:192.168.1.255", "192.168.1.255"),
             ("::ffff:8.8.8.8", "8.8.8.8"),
             ("2007::2021", "2007::2021"),
-            ("::ffff:2007:2021", "::ffff:2007:2021"),
+            ("::ffff:2007:2021", "32.7.32.33"),  # Hex form of ::ffff:0:0/96 is still IPv4-mapped
             ("2007::ffff:2021", "2007::ffff:2021"),
             ("12.34.56.78", "12.34.56.78"),
             ("foobar", "foobar"),
@@ -508,12 +1037,434 @@ class TestMisc:
         ],
     )
     def test_strip_ipv4_mapped_notation(self, ip, result):
-        misc.strip_ipv4_mapped_notation(ip) == result
+        assert misc.strip_ipv4_mapped_notation(ip) == result
+
+    def test_sort_to_opts(self):
+        for result, sort_type in GUESSIT_SORT_TYPES.items():
+            assert misc.sort_to_opts(sort_type) == result
+
+    @pytest.mark.parametrize(
+        "sort_type, result",
+        [
+            ("", 0),
+            ("foobar", 0),
+            (False, 0),
+            (666, 0),
+        ],
+    )
+    def test_sort_to_opts_edge_cases(self, sort_type, result):
+        assert misc.sort_to_opts(sort_type) == result
+
+    @pytest.mark.parametrize("movie_limit", ["", "42M"])
+    @pytest.mark.parametrize("episode_limit", ["", "13M"])
+    @pytest.mark.parametrize("movie_sort_extra", ["", "disc%1"])
+    @pytest.mark.parametrize("tv_enabled", [True, False])
+    @pytest.mark.parametrize("tv_str", ["", "foobar tv"])
+    @pytest.mark.parametrize("tv_cats", [sample(["tv", "sports"], randint(0, 2))])
+    @pytest.mark.parametrize("date_enabled", [True, False])
+    @pytest.mark.parametrize("date_str", ["", "foobar date"])
+    @pytest.mark.parametrize("date_cats", [sample(["date"], randint(0, 1))])
+    @pytest.mark.parametrize("movie_enabled", [True, False])
+    @pytest.mark.parametrize("movie_str", ["", "foobar movie"])
+    @pytest.mark.parametrize("movie_cats", [[], ["movie"], ["movie", "horror", "docu"]])
+    @pytest.mark.config(
+        lambda params: {
+            "movie_rename_limit": params["movie_limit"],
+            "episode_rename_limit": params["episode_limit"],
+            "movie_sort_extra": params["movie_sort_extra"],
+            "enable_tv_sorting": params["tv_enabled"],
+            "tv_sort_string": params["tv_str"],
+            "tv_categories": params["tv_cats"],
+            "enable_movie_sorting": params["movie_enabled"],
+            "movie_sort_string": params["movie_str"],
+            "movie_categories": params["movie_cats"],
+            "enable_date_sorting": params["date_enabled"],
+            "date_sort_string": params["date_str"],
+            "date_categories": params["date_cats"],
+            "language": "en",  # Avoid translated sorter names in the test
+        }
+    )
+    def test_convert_sorter_settings(
+        self,
+        movie_limit,
+        episode_limit,
+        movie_sort_extra,
+        tv_enabled,
+        tv_str,
+        tv_cats,
+        date_enabled,
+        date_str,
+        date_cats,
+        movie_enabled,
+        movie_str,
+        movie_cats,
+    ):
+        def _func():
+            # Delete any leftover/pre-defined new-style sorters
+            if existing_sorters := get_sorters():
+                for config in list(existing_sorters.keys()):
+                    existing_sorters[config].delete()
+            assert not get_sorters()
+
+            # Run conversion
+            misc.convert_sorter_settings()
+
+            # Persisting is a no-op here (no INI file backs the config in this barebones
+            # test); save_config() returns False rather than raising. The in-memory result
+            # is what's verified below.
+            save_config()
+
+            # Verify the resulting config
+            new_sorters = get_sorters()
+            new_sorter_count = 0
+
+            for old_sorter_type, old_name, old_str, old_cats, old_enabled in (
+                ("tv", "Series Sorting", tv_str, tv_cats, tv_enabled),
+                ("date", "Date Sorting", date_str, date_cats, date_enabled),
+                ("movie", "Movie Sorting", movie_str, movie_cats, movie_enabled),
+            ):
+                if not old_str or not old_cats or not old_enabled:
+                    # Without these two essential variables, no new sorter config should be generated
+                    assert old_name not in new_sorters.keys()
+                    continue
+
+                # Run basic checks on the new sorter
+                assert new_sorters[old_name]
+                new_sorter = new_sorters[old_name].get_dict()
+                assert len(new_sorter) == 8
+
+                # Handle the old, movie-specific sorting features
+                size_limit = movie_limit if old_sorter_type == "movie" else episode_limit
+                part_label = movie_sort_extra if old_sorter_type == "movie" else ""
+
+                # Verify the entire new sorter config
+                for key, value in (
+                    ("name", old_name),
+                    ("order", new_sorter_count),
+                    ("min_size", size_limit),
+                    ("multipart_label", part_label),
+                    ("sort_string", old_str),
+                    ("sort_cats", old_cats),
+                    ("sort_type", [misc.sort_to_opts(old_sorter_type)]),
+                    ("is_active", int(old_enabled)),
+                ):
+                    assert (new_sorter[key]) == value
+
+                # Update counter
+                new_sorter_count += 1
+
+            # Verify no extra sorters appeared out of nowhere
+            assert new_sorter_count == len(new_sorters)
+
+        _func()
+
+    @pytest.mark.parametrize(
+        "argument, name, password",
+        [
+            ("my_awesome_nzb_file{{password}}", "my_awesome_nzb_file", "password"),
+            ("file_with_text_after_pw{{passw0rd}}_[180519]", "file_with_text_after_pw", "passw0rd"),
+            ("file_without_pw", "file_without_pw", None),
+            ("multiple_pw{{first-pw}}_{{second-pw}}", "multiple_pw", "first-pw}}_{{second-pw"),  # Greed is Good
+            ("デビアン", "デビアン", None),  # Unicode
+            ("Gentoo_Hobby_Edition {{secret}}", "Gentoo_Hobby_Edition", "secret"),  # Space between name and password
+            ("Test {{secret}}.nzb", "Test", "secret"),
+            ("Mandrake{{top{{secret}}", "Mandrake", "top{{secret"),  # Double opening {{
+            ("Красная}}{{Шляпа}}", "Красная}}", "Шляпа"),  # Double closing }}
+            ("{{Jobname{{PassWord}}", "{{Jobname", "PassWord"),  # {{ at start
+            ("Hello/kITTY", "Hello", "kITTY"),  # Notation with slash
+            ("Hello/kITTY.nzb", "Hello", "kITTY"),  # Notation with slash and extension
+            ("/Jobname", "/Jobname", None),  # Slash at start
+            ("Jobname/Top{{Secret}}", "Jobname", "Top{{Secret}}"),  # Slash with braces
+            ("Jobname / Top{{Secret}}", "Jobname", "Top{{Secret}}"),  # Slash with braces and extra spaces
+            ("Jobname / Top{{Secret}}.nzb", "Jobname", "Top{{Secret}}"),
+            ("לינוקס/معلومات سرية", "לינוקס", "معلومات سرية"),  # LTR with slash
+            ("לינוקס{{معلومات سرية}}", "לינוקס", "معلومات سرية"),  # LTR with brackets
+            ("thư điện tử password=mật_khẩu", "thư điện tử", "mật_khẩu"),  # Password= notation
+            ("password=PartOfTheJobname", "password=PartOfTheJobname", None),  # Password= at the start
+            ("Job password=Test.par2", "Job", "Test"),  # Password= including extension
+            ("Job}}Name{{FTW", "Job}}Name{{FTW", None),  # Both {{ and }} present but incorrect order (no password)
+            ("./Text", "./Text", None),  # Name would end up empty after the function strips the dot
+        ],
+    )
+    def test_scan_password(self, argument, name, password):
+        assert misc.scan_password(argument) == (name, password)
+
+    @pytest.mark.parametrize(
+        "subject, filename",
+        [
+            ('Great stuff (001/143) - "Filename.txt" yEnc (1/1)', "Filename.txt"),
+            (
+                '"910a284f98ebf57f6a531cd96da48838.vol01-03.par2" yEnc (1/3)',
+                "910a284f98ebf57f6a531cd96da48838.vol01-03.par2",
+            ),
+            ('Subject-KrzpfTest [02/30] - ""KrzpfTest.part.nzb"" yEnc', "KrzpfTest.part.nzb"),
+            (
+                '[PRiVATE]-[WtFnZb]-[Supertje-_S03E11-12_-blabla_+_blabla_WEBDL-480p.mkv]-[4/12] - "" yEnc 9786 (1/1366)',
+                "Supertje-_S03E11-12_-blabla_+_blabla_WEBDL-480p.mkv",
+            ),
+            (
+                '[N3wZ] MAlXD245333\\::[PRiVATE]-[WtFnZb]-[Show.S04E04.720p.AMZN.WEBRip.x264-GalaxyTV.mkv]-[1/2] - "" yEnc  293197257 (1/573)',
+                "Show.S04E04.720p.AMZN.WEBRip.x264-GalaxyTV.mkv",
+            ),
+            (
+                'reftestnzb bf1664007a71 [1/6] - "20b9152c-57eb-4d02-9586-66e30b8e3ac2" yEnc (1/22) 15728640',
+                "20b9152c-57eb-4d02-9586-66e30b8e3ac2",
+            ),
+            (
+                "Re: REQ Author Child's The Book-Thanks much - Child, Lee - Author - The Book.epub (1/1)",
+                "REQ Author Child's The Book-Thanks much - Child, Lee - Author - The Book.epub",
+            ),
+            ('63258-0[001/101] - "63258-2.0" yEnc (1/250) (1/250)', "63258-2.0"),
+            # If specified between ", the extension is allowed to be too long
+            ('63258-0[001/101] - "63258-2.0toolong" yEnc (1/250) (1/250)', "63258-2.0toolong"),
+            (
+                "Singer - A Album (2005) - [04/25] - 02 Sweetest Somebody (I Know).flac",
+                "Singer - A Album (2005) - [04/25] - 02 Sweetest Somebody (I Know).flac",
+            ),
+            ("<>random!>", "<>random!>"),
+            ("nZb]-[Supertje-_S03E11-12_", "nZb]-[Supertje-_S03E11-12_"),
+            ("Bla [Now it's done.exe]", "Now it's done.exe"),
+            # If specified between [], the extension should be a valid one
+            ("Bla [Now it's done.123nonsense]", "Bla [Now it's done.123nonsense]"),
+            ('[PRiVATE]-[WtFnZb]-[00000.clpi]-[1/46] - "" yEnc  788 (1/1)', "00000.clpi"),
+            (
+                '[PRiVATE]-[WtFnZb]-[Video_(2001)_AC5.1_-RELEASE_[TAoE].mkv]-[1/23] - "" yEnc 1234567890 (1/23456)',
+                "Video_(2001)_AC5.1_-RELEASE_[TAoE].mkv",
+            ),
+            (
+                "[PRiVATE]-[WtFnZb]-[219]-[1/series.name.s01e01.1080p.web.h264-group.mkv] - "
+                " yEnc (1/[PRiVATE] \\c2b510b594\\::686ea969999193.155368eba4965e56a8cd263382e012.f2712fdc::/97bd201cf931/) 1 (1/0)",
+                "series.name.s01e01.1080p.web.h264-group.mkv",
+            ),
+            (
+                "[PRiVATE]-[WtFnZb]-[/More.Bla.S02E01.1080p.WEB.h264-EDITH[eztv.re].mkv-WtF[nZb]/"
+                'More.Bla.S02E01.1080p.WEB.h264-EDITH.mkv]-[1/2] - "" yEnc  2990558544 (1/4173)',
+                "More.Bla.S02E01.1080p.WEB.h264-EDITH[eztv.re].mkv",
+            ),
+        ],
+    )
+    def test_name_extractor(self, subject, filename):
+        assert misc.subject_name_extractor(subject) == filename
+
+
+def ipv6_loopback_available() -> bool:
+    """Not every CI runner can bind ::1, so check instead of assuming"""
+    if not socket.has_ipv6:
+        return False
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock:
+            sock.bind(("::1", 0))
+        return True
+    except OSError:
+        return False
+
+
+skip_without_ipv6 = pytest.mark.skipif(not ipv6_loopback_available(), reason="No usable IPv6 loopback")
+
+
+def low_ports_are_privileged() -> bool:
+    """Whether binding port 80 needs privileges for the user running the tests"""
+    if sys.platform.startswith("win") or not hasattr(os, "geteuid") or os.geteuid() == 0:
+        return False
+    try:
+        # Linux allows the privileged range to be moved, including down to nothing
+        with open("/proc/sys/net/ipv4/ip_unprivileged_port_start") as sysctl:
+            return int(sysctl.read().strip()) > 80
+    except OSError:
+        return True
+
+
+skip_without_privileged_ports = pytest.mark.skipif(
+    not low_ports_are_privileged(), reason="Low ports are not privileged for this user"
+)
+
+
+class TestPortIsFree:
+    """Tests for misc.port_is_free() and misc.find_free_port()"""
+
+    @staticmethod
+    @contextmanager
+    def _listener(host: str = "127.0.0.1", family: int = socket.AF_INET):
+        """Listen on an OS-assigned port on host, yielding that port."""
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        # Match port_is_free, so a port left in TIME_WAIT by an earlier test
+        # cannot make this bind fail
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, 0))
+            sock.listen(1)
+            yield sock.getsockname()[1]
+        finally:
+            sock.close()
+
+    @staticmethod
+    @contextmanager
+    def _listener_in_scan_range():
+        """Listen on a port low enough for find_free_port() to scan onwards from.
+        OS-assigned ports land in the dynamic range, above its 49151 ceiling."""
+        for port in range(10000, 10500, 5):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", port))
+                sock.listen(1)
+            except OSError:
+                sock.close()
+                continue
+            try:
+                yield port
+            finally:
+                sock.close()
+            return
+        pytest.skip("No free port available in the scan range")
+
+    @staticmethod
+    def _released_port(host: str = "127.0.0.1", family: int = socket.AF_INET) -> int:
+        """Return a port that was bindable a moment ago."""
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            sock.bind((host, 0))
+            return sock.getsockname()[1]
+
+    def test_free_port_returns_true(self):
+        assert misc.port_is_free("127.0.0.1", self._released_port()) is True
+
+    def test_occupied_port_returns_false(self):
+        with self._listener() as port:
+            assert misc.port_is_free("127.0.0.1", port) is False
+
+    @pytest.mark.parametrize(
+        "host, family",
+        [
+            ("0.0.0.0", socket.AF_INET),
+            ("", socket.AF_INET),
+            ("127.0.0.1", socket.AF_INET),
+            ("::", socket.AF_INET6),
+            ("::1", socket.AF_INET6),
+        ],
+    )
+    def test_binds_the_host_it_was_given(self, host, family):
+        """The previous version remapped the bind-all addresses to 127.0.0.1, so
+        it probed the wrong address and, for ::, the wrong family as well.
+
+        Asserted against the bind call rather than by watching two sockets fight
+        over a port, because whether a wildcard and a specific address may share
+        one is decided by the kernel and differs on Linux, macOS and Windows."""
+        with mock.patch("sabnzbd.misc.socket.socket") as fake_socket:
+            misc.port_is_free(host, 8080)
+        assert fake_socket.call_args.args[0] == family
+        fake_socket.return_value.bind.assert_called_once_with((host, 8080))
+
+    def test_free_port_is_actually_bindable(self):
+        """The property that matters: True has to mean uvicorn can bind it."""
+        port = self._released_port()
+        assert misc.port_is_free("127.0.0.1", port) is True
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", port))
+
+    @skip_without_ipv6
+    def test_occupied_ipv6_port_returns_false(self):
+        with self._listener("::1", socket.AF_INET6) as port:
+            assert misc.port_is_free("::1", port) is False
+
+    @skip_without_ipv6
+    def test_ipv4_listener_does_not_block_ipv6(self):
+        """A port held on 127.0.0.1 says nothing about the same port on ::1."""
+        with self._listener("127.0.0.1") as port:
+            assert misc.port_is_free("::1", port) is True
+
+    def test_non_local_host_raises(self):
+        """An address that is not ours cannot be bound on any port, so it must not
+        look like an ordinary busy port (192.0.2.0/24 is TEST-NET-1)."""
+        with pytest.raises(misc.HostNotAvailableError):
+            misc.port_is_free("192.0.2.1", 8080)
+
+    def test_find_free_port_propagates_host_not_available(self):
+        with pytest.raises(misc.HostNotAvailableError):
+            misc.find_free_port("192.0.2.1", 8080)
+
+    def test_unresolvable_host_returns_false(self):
+        assert misc.port_is_free("no-such-host.invalid", 8080) is False
+
+    def test_bind_web_socket_reserves_the_port(self):
+        """The whole point of handing uvicorn a ready-made socket: from here on
+        nothing else can take the port. Binding alone is not enough for that, a
+        socket only reserves a port once it listens."""
+        sock = misc.bind_web_socket("127.0.0.1", 0)
+        try:
+            host, port = sock.getsockname()[:2]
+            assert host == "127.0.0.1"
+            assert port > 0
+            assert misc.port_is_free("127.0.0.1", port) is False
+        finally:
+            sock.close()
+
+    @pytest.mark.skipif(not socket.has_dualstack_ipv6(), reason="No dual-stack IPv6 support")
+    def test_bind_web_socket_all_ipv6_accepts_ipv4(self):
+        sock = misc.bind_web_socket("::", 0)
+        try:
+            port = sock.getsockname()[1]
+            assert sock.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY) == 0
+            socket.create_connection(("127.0.0.1", port), timeout=2).close()
+        finally:
+            sock.close()
+
+    def test_bind_web_socket_closes_socket_on_failure(self):
+        """A failed bind must not leak the file descriptor."""
+        with self._listener() as port:
+            with pytest.raises(OSError):
+                misc.bind_web_socket("127.0.0.1", port)
+
+    @staticmethod
+    def _barred_socket():
+        """Patch the probe's socket so binding is refused for lack of privileges."""
+        sock = mock.MagicMock()
+        sock.bind.side_effect = PermissionError("Permission denied")
+        return mock.patch("sabnzbd.misc.socket.socket", return_value=sock)
+
+    def test_barred_port_raises(self):
+        """A port we may not use is a different problem from an occupied one, so
+        it must not come back as a plain False."""
+        with self._barred_socket(), pytest.raises(PermissionError):
+            misc.port_is_free("0.0.0.0", 80)
+
+    @skip_without_privileged_ports
+    def test_low_port_raises_permission_error(self):
+        """Guards the premise: the platform really does report this as EACCES."""
+        with pytest.raises(PermissionError):
+            misc.port_is_free("127.0.0.1", 80)
+
+    def test_find_free_port_propagates_permission_error(self):
+        """Scanning on past a barred port could only end in a misleading answer."""
+        with self._barred_socket(), pytest.raises(PermissionError):
+            misc.find_free_port("0.0.0.0", 80)
+
+    def test_find_free_port_returns_port_in_scan_range(self):
+        port = misc.find_free_port("127.0.0.1", 10000)
+        assert port is not None
+        assert 10000 <= port <= 10045
+
+    def test_find_free_port_skips_occupied(self):
+        with self._listener_in_scan_range() as port:
+            free = misc.find_free_port("127.0.0.1", port)
+            assert free is not None
+            assert free > port
+            assert misc.port_is_free("127.0.0.1", free) is True
+
+    def test_find_free_port_above_ceiling(self):
+        """49152 and up is the dynamic range, so it is never scanned."""
+        assert misc.find_free_port("127.0.0.1", 49200) is None
+
+    def test_find_free_port_rejects_port_zero(self):
+        """Binding port 0 always succeeds, which would return a misleading 0."""
+        assert misc.find_free_port("127.0.0.1", 0) is None
 
 
 class TestBuildAndRunCommand:
     # Path should exist
-    script_path = os.path.join(SAB_BASE_DIR, "test_misc.py")
+    @cached_property
+    def script_path(self):
+        return os.path.join(SAB_BASE_DIR, "test_misc.py")
 
     def test_none_check(self):
         with pytest.raises(IOError):
@@ -541,8 +1492,8 @@ class TestBuildAndRunCommand:
         # See: https://github.com/sabnzbd/sabnzbd/issues/1043
         misc.build_and_run_command(["UnRar.exe", "\\\\?\\C:\\path\\"])
         assert mock_subproc_popen.call_args[0][0] == ["UnRar.exe", "\\\\?\\C:\\path\\"]
-        misc.build_and_run_command(["UnRar.exe", "\\\\?\\C:\\path\\"], flatten_command=True)
-        assert mock_subproc_popen.call_args[0][0] == '"UnRar.exe" "\\\\?\\C:\\path\\"'
+        misc.build_and_run_command(["UnRar.exe", "\\\\?\\C:\\path\\", "pass'\"word"], windows_unrar_command=True)
+        assert mock_subproc_popen.call_args[0][0] == '"UnRar.exe" "\\\\?\\C:\\path\\" "pass\'""word"'
 
     @mock.patch("sabnzbd.misc.userxbit")
     @mock.patch("subprocess.Popen")
@@ -551,11 +1502,14 @@ class TestBuildAndRunCommand:
         misc.build_and_run_command([self.script_path], stderr=subprocess.DEVNULL)
         assert mock_subproc_popen.call_args[1]["stderr"] == subprocess.DEVNULL
 
-    @set_platform("linux")
-    @set_config({"nice": "--adjustment=-7", "ionice": "-t -n9 -c7"})
+    @pytest.mark.platform("linux")
+    @pytest.mark.config({"nice": "--adjustment=-7", "ionice": "-t -n9 -c7"})
     @mock.patch("sabnzbd.misc.userxbit")
     @mock.patch("subprocess.Popen")
-    def test_linux_features(self, mock_subproc_popen, userxbit):
+    def test_linux_features(self, mock_subproc_popen, userxbit, monkeypatch):
+        monkeypatch.setattr(newsunpack, "NICE_COMMAND", None)
+        monkeypatch.setattr(newsunpack, "IONICE_COMMAND", None)
+
         # Should break on no-execute permissions
         userxbit.return_value = False
         with pytest.raises(IOError):
@@ -573,9 +1527,14 @@ class TestBuildAndRunCommand:
         ]
         os.remove(temp_file_path)
 
+        # Make sure Windows UnRar patching stays on Windows
+        test_cmd = ["unrar", "/home/", "pass'\"word"]
+        misc.build_and_run_command(test_cmd, windows_unrar_command=True)
+        assert mock_subproc_popen.call_args[0][0] == test_cmd
+
         # Have to fake these for it to work
-        newsunpack.IONICE_COMMAND = "ionice"
-        newsunpack.NICE_COMMAND = "nice"
+        monkeypatch.setattr(newsunpack, "IONICE_COMMAND", "ionice")
+        monkeypatch.setattr(newsunpack, "NICE_COMMAND", "nice")
         userxbit.return_value = True
         misc.build_and_run_command([self.script_path, "input 1"])
         assert mock_subproc_popen.call_args[0][0] == [
@@ -588,3 +1547,247 @@ class TestBuildAndRunCommand:
             self.script_path,
             "input 1",
         ]
+
+
+class TestSABRarFile:
+    @pytest.mark.parametrize(
+        "test_dir, rar_files, password, expected_correct",
+        [
+            (
+                "tests/data/basic_rar3",
+                ["testfile.rar"],
+                "NOT_ENCRYPTED_AND_CHECK_NOT_SUPPORTED",
+                True,
+            ),
+            (
+                "tests/data/basic_rar3_64",
+                ["testfile.rar"],
+                "CHECK_NOT_SUPPORTED",
+                True,
+            ),
+            (
+                "tests/data/basic_rar5",
+                ["testfile.rar"],
+                "NOT_ENCRYPTED",
+                True,
+            ),
+            (
+                "tests/data/basic_rar5_64_header_blake2",
+                ["testfile.rar"],
+                "HEADER_ENCRYPTION_WRONG_PASSWORD",
+                False,
+            ),
+            (
+                "tests/data/basic_rar5_64_header_blake2",
+                ["testfile.rar"],
+                "75f8c9f91969b42eaaadc389739df9ed65e8970f9ad333a146e4f73e3875b69a",
+                True,
+            ),
+            (
+                "tests/data/basic_rar5_64",
+                ["testfile.rar"],
+                "WRONG_PASSWORD",
+                False,
+            ),
+            (
+                "tests/data/basic_rar5_64",
+                ["testfile.rar"],
+                "75f8c9f91969b42eaaadc389739df9ed65e8970f9ad333a146e4f73e3875b69a",
+                True,
+            ),
+        ],
+    )
+    def test_rar5_check_password(self, test_dir, rar_files, password, expected_correct):
+        expected = nullcontext() if expected_correct else pytest.raises(rarfile.RarWrongPassword)
+
+        for rar_file in rar_files:
+            with SABRarFile(os.path.join(test_dir, rar_file), part_only=True) as zf:
+                with expected:
+                    zf.setpassword(password)
+                if zf._file_parser.has_header_encryption() and expected_correct:
+                    assert zf.namelist()
+
+    @pytest.mark.parametrize(
+        "test_dir, rar_files, expected_files",
+        [
+            (
+                "tests/data/basic_rar5_64",
+                ["testfile.rar"],
+                ["My_Test_Download.bin", "testfile.bin", "Testfile_1234.bin"],
+            ),
+        ],
+    )
+    def test_rar5_check_password_after_parse(self, test_dir, rar_files, expected_files):
+        """The password check should occur after parse finishes so
+        that infolist is fully populated when headers are not encrypted"""
+        for rar_file in rar_files:
+            with SABRarFile(os.path.join(test_dir, rar_file), part_only=True) as zf:
+                with pytest.raises(rarfile.RarWrongPassword):
+                    zf.setpassword("WRONG_PASSWORD")
+                assert zf.namelist() == expected_files
+
+
+def patched_cgroup_open(files: dict[str, str]):
+    """Present exactly the given files below /sys/fs/cgroup, leaving other opens alone"""
+    real_open = open
+
+    def _open(path, *args, **kwargs):
+        if str(path).startswith("/sys/fs/cgroup"):
+            if str(path) in files:
+                return mock.mock_open(read_data=files[str(path)])()
+            raise FileNotFoundError(path)
+        return real_open(path, *args, **kwargs)
+
+    return mock.patch("builtins.open", _open)
+
+
+@pytest.mark.platform("linux")
+class TestCgroupMemoryLimit:
+    """Container memory detection, see _cgroup_memory_limit()"""
+
+    GIGI = 1024**3
+    V2_HIGH = "/sys/fs/cgroup/memory.high"
+    V2_MAX = "/sys/fs/cgroup/memory.max"
+    V1_MAX = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
+
+    def patched_open(self, files: dict[str, str]):
+        return patched_cgroup_open(files)
+
+    def test_no_cgroup_files(self):
+        with self.patched_open({}):
+            assert misc._cgroup_memory_limit() is None
+
+    def test_v2_max_only(self):
+        with self.patched_open({self.V2_MAX: str(2 * self.GIGI)}):
+            assert misc._cgroup_memory_limit() == 2 * self.GIGI
+
+    def test_v2_unlimited(self):
+        with self.patched_open({self.V2_MAX: "max", self.V2_HIGH: "max"}):
+            assert misc._cgroup_memory_limit() is None
+
+    def test_v2_high_below_max_wins(self):
+        """memory.high throttles, so it is the budget we should size against"""
+        with self.patched_open({self.V2_HIGH: str(self.GIGI), self.V2_MAX: str(4 * self.GIGI)}):
+            assert misc._cgroup_memory_limit() == self.GIGI
+
+    def test_v2_high_unset_falls_back_to_max(self):
+        with self.patched_open({self.V2_HIGH: "max", self.V2_MAX: str(2 * self.GIGI)}):
+            assert misc._cgroup_memory_limit() == 2 * self.GIGI
+
+    def test_v1_limit(self):
+        with self.patched_open({self.V1_MAX: str(512 * 1024 * 1024)}):
+            assert misc._cgroup_memory_limit() == 512 * 1024 * 1024
+
+    def test_v1_unlimited_sentinel(self):
+        """v1 reports a huge sentinel rather than a keyword when unlimited"""
+        with self.patched_open({self.V1_MAX: "9223372036854771712"}):
+            assert misc._cgroup_memory_limit() is None
+
+    def test_garbage_is_ignored(self):
+        with self.patched_open({self.V2_MAX: "not-a-number"}):
+            assert misc._cgroup_memory_limit() is None
+
+    def test_get_memory_clamps_to_cgroup(self):
+        with self.patched_open({self.V2_MAX: str(self.GIGI)}):
+            with mock.patch("sabnzbd.misc._physical_memory", return_value=64 * self.GIGI):
+                assert misc.get_memory() == self.GIGI
+
+    def test_get_memory_keeps_physical_when_lower(self):
+        with self.patched_open({self.V2_MAX: str(64 * self.GIGI)}):
+            with mock.patch("sabnzbd.misc._physical_memory", return_value=8 * self.GIGI):
+                assert misc.get_memory() == 8 * self.GIGI
+
+    def test_get_memory_uses_cgroup_when_physical_unknown(self):
+        """_physical_memory() returns None when it cannot be determined"""
+        with self.patched_open({self.V2_MAX: str(self.GIGI)}):
+            with mock.patch("sabnzbd.misc._physical_memory", return_value=None):
+                assert misc.get_memory() == self.GIGI
+
+    def test_get_memory_zero_when_nothing_known(self):
+        with self.patched_open({}):
+            with mock.patch("sabnzbd.misc._physical_memory", return_value=None):
+                assert misc.get_memory() == 0
+
+
+def patched_available_cpus(count: Optional[int]):
+    """Report count CPUs from whichever call get_cpus() makes, or fail every call when None"""
+    patches = ExitStack()
+    patches.enter_context(mock.patch("os.process_cpu_count", return_value=count, create=True))
+    if count:
+        patches.enter_context(mock.patch("os.sched_getaffinity", return_value=set(range(count)), create=True))
+    else:
+        patches.enter_context(mock.patch("os.sched_getaffinity", side_effect=OSError, create=True))
+    return patches
+
+
+@pytest.mark.platform("linux")
+class TestGetCpus:
+    """Container CPU detection in get_cpus()"""
+
+    HOST = 64
+    V2_MAX = "/sys/fs/cgroup/cpu.max"
+    V1_QUOTA = "/sys/fs/cgroup/cpu/cpu.cfs_quota_us"
+    V1_PERIOD = "/sys/fs/cgroup/cpu/cpu.cfs_period_us"
+
+    def cpus(self, files: dict[str, str], available: Optional[int] = HOST) -> int:
+        with patched_cgroup_open(files), patched_available_cpus(available):
+            return misc.get_cpus()
+
+    def test_no_cgroup_files(self):
+        assert self.cpus({}) == self.HOST
+
+    def test_v2_quota(self):
+        assert self.cpus({self.V2_MAX: "400000 100000"}) == 4
+
+    def test_v2_unlimited(self):
+        assert self.cpus({self.V2_MAX: "max 100000"}) == self.HOST
+
+    def test_v2_partial_cpu_rounds_up(self):
+        """1.5 CPUs is 2 threads: a pool sized to 1 wastes half the allowance"""
+        assert self.cpus({self.V2_MAX: "150000 100000"}) == 2
+
+    def test_v2_below_one_cpu_never_zero(self):
+        assert self.cpus({self.V2_MAX: "20000 100000"}) == 1
+
+    def test_v1_quota(self):
+        assert self.cpus({self.V1_QUOTA: "200000", self.V1_PERIOD: "100000"}) == 2
+
+    def test_v1_unlimited_sentinel(self):
+        """v1 spells unlimited as -1 rather than a keyword"""
+        assert self.cpus({self.V1_QUOTA: "-1", self.V1_PERIOD: "100000"}) == self.HOST
+
+    def test_garbage_is_ignored(self):
+        assert self.cpus({self.V2_MAX: "not-a-number 100000"}) == self.HOST
+
+    def test_unreadable_file_is_logged(self, caplog):
+        with caplog.at_level(logging.INFO):
+            self.cpus({self.V2_MAX: "not-a-number 100000"})
+        assert "cgroup v2 CPU quota" in caplog.text
+
+    def test_missing_files_are_not_logged(self, caplog):
+        with caplog.at_level(logging.INFO):
+            self.cpus({})
+        assert "cgroup" not in caplog.text
+
+    def test_keeps_available_when_lower(self):
+        """Affinity can be narrower than the quota, and it is the harder limit"""
+        assert self.cpus({self.V2_MAX: "3200000 100000"}, available=4) == 4
+
+    def test_uses_cgroup_when_available_unknown(self):
+        assert self.cpus({self.V2_MAX: "200000 100000"}, available=None) == 2
+
+    def test_zero_when_nothing_known(self):
+        assert self.cpus({}, available=None) == 0
+
+
+class TestAvailableCpus:
+    def test_returns_something_sane(self):
+        """Whatever route it takes, this machine has at least one CPU"""
+        assert misc.get_cpus() >= 1
+
+    def test_survives_a_broken_platform(self):
+        with mock.patch("os.cpu_count", side_effect=OSError):
+            with mock.patch("os.process_cpu_count", side_effect=OSError, create=True):
+                with mock.patch("os.sched_getaffinity", side_effect=OSError, create=True):
+                    with patched_cgroup_open({}):
+                        assert misc.get_cpus() == 0

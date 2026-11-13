@@ -1,12 +1,20 @@
 # Testing requirements
-selenium
-requests
 pytest
+setuptools
+pytest-playwright
+playwright>=1.55
+requests
 pyfakefs
-pytest-httpbin
+werkzeug
 pytest-httpserver
 flaky
 xmltodict
 tavern
+flask
 tavalidate
-lxml>=4.5.0 # needed by tavalidate
+importlib_metadata
+lxml
+black
+pytest-mock
+pytest-asyncio
+pytest-xdist

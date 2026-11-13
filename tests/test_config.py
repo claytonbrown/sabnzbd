@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -OO
-# Copyright 2007-2021 The SABnzbd-Team <team@sabnzbd.org>
+# Copyright 2007-2026 by The SABnzbd-Team (sabnzbd.org)
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -16,79 +16,376 @@
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 """
-tests.test_config - Testing functions in config.py
+tests.test_config - Tests of config methods
 """
 
-import sabnzbd.config as config
+import io
+import os
+import shutil
+import time
+import zipfile
+
+import configobj
+import pytest
+
+import sabnzbd
+import sabnzbd.cfg
+import sabnzbd.database
+from sabnzbd import config, filesystem
+from sabnzbd.constants import (
+    CONFIG_BACKUP_FILES,
+    CONFIG_BACKUP_HTTPS,
+    DB_HISTORY_NAME,
+    DEF_HTTPS_CERT_FILE,
+    DEF_HTTPS_KEY_FILE,
+    DEF_INI_FILE,
+)
+from sabnzbd.filesystem import long_path
+from tests.testhelper import SAB_CACHE_DIR, SAB_COMPLETE_DIR, SAB_DATA_DIR
+
+DEF_CHAIN_FILE = "server.chain"
+
+# Stand-in for the SQLite online backup of the history database. This test only
+# fabricates history1.db as a file, while a real snapshot needs a live database
+# and connection pool, so history_db_snapshot is patched to return these bytes.
+# The snapshot itself is tested in tests/test_database.py.
+FAKE_HISTORY_SNAPSHOT = b"fake history database snapshot"
 
 
-class TestValidators:
-    def test_clean_nice_ionice_parameters_allowed(self):
-        """Allowed nice and ionice parameters
-        https://linux.die.net/man/1/nice
-        https://linux.die.net/man/1/ionice
-        """
+class TestOptions:
+    test_section = "test_section"
+    test_keyword = "test_keyword"
 
-        def assert_allowed(inp_value):
-            """Helper function to check for block"""
-            msg, value = config.clean_nice_ionice_parameters(inp_value)
-            assert msg is None
-            assert value == inp_value
+    def test_base_option(self):
+        test_option = config.Option(self.test_section, self.test_keyword)
+        assert test_option.section == self.test_section
+        assert test_option.keyword == self.test_keyword
+        assert test_option.section in config.CONFIG.database
+        assert test_option.keyword in config.CONFIG.database[test_option.section]
+        assert config.CONFIG.database[test_option.section][test_option.keyword] == test_option
 
-        # nice
-        assert_allowed("-n1")
-        assert_allowed("-n-11")
-        assert_allowed("-n 3")
-        assert_allowed("-n -4")
-        assert_allowed("--adjustment=11")
-        assert_allowed("--adjustment=-7")
-        assert_allowed("--adjustment 20")
-        assert_allowed("--adjustment -8")
+    @pytest.mark.xfail(reason="These tests should be added")
+    def test_all(self):
+        # Need to add tests for all the relevant options
+        raise NotImplementedError
 
-        # ionice
-        assert_allowed("-c1")
-        assert_allowed("-c-11")
-        assert_allowed("-c 3")
-        assert_allowed("-c -4")
-        assert_allowed("--classdata=1")
-        assert_allowed("--classdata=-11")
-        assert_allowed("--classdata 3")
-        assert_allowed("--classdata -4")
-        assert_allowed("-t")
-        assert_allowed("--ignore")
-        assert_allowed("-c 11 -n 12 -t")
-        assert_allowed("-c 11 --classdata=12 --ignore")
-        assert_allowed("--ignore -n9 --class=7")
-        assert_allowed("-t -n9 -c7")
+    def test_non_public(self):
+        test_option = config.Option(self.test_section, self.test_keyword, public=True)
+        assert test_option.get_dict() == {self.test_keyword: None}
+        assert test_option.get_dict(for_public_api=False) == {self.test_keyword: None}
 
-    def test_clean_nice_ionice_parameters_blocked(self):
-        """Should all be blocked"""
+        test_option = config.Option(self.test_section, self.test_keyword, public=False)
+        assert test_option.get_dict() == {self.test_keyword: None}
+        assert test_option.get_dict(for_public_api=True) == {}
 
-        def assert_blocked(inp_value):
-            """Helper function to check for block"""
-            msg, value = config.clean_nice_ionice_parameters(inp_value)
-            assert msg
-            assert msg.startswith("Incorrect parameter")
-            assert value is None
+        # Password is special when using for_public_api
+        test_option = config.OptionPassword(self.test_section, self.test_keyword, default_val="test_password")
+        assert test_option.get_dict() == {self.test_keyword: "test_password"}
+        assert test_option.get_dict(for_public_api=True) == {self.test_keyword: "**********"}
 
-        assert_blocked("-ca")
-        assert_blocked("-t11")
-        assert_blocked("-p 11")
-        assert_blocked("123")
-        assert_blocked("/bin/sh /tmp/test.sh")
-        assert_blocked("'/evil.sh' 11")
-        assert_blocked("; 11")
-        assert_blocked("python evil.py")
-        assert_blocked("-n5 /bin/echo 666")
-        assert_blocked("4 && test.sh")
-        assert_blocked("-t | bla.py")
-        assert_blocked("5 || now")
-        assert_blocked("echo 'how;now;brown;cow'")
-        assert_blocked("-c'echo'")
-        assert_blocked("--classdata=;/bin/echo")
 
-    def test_validate_single_tag(self):
-        assert config.validate_single_tag(["TV", ">", "HD"]) == (None, ["TV > HD"])
-        assert config.validate_single_tag(["TV", ">", "HD", "Plus"]) == (None, ["TV", ">", "HD", "Plus"])
-        assert config.validate_single_tag(["alt.bin", "alt.tv"]) == (None, ["alt.bin", "alt.tv"])
-        assert config.validate_single_tag(["alt.group"]) == (None, ["alt.group"])
+@pytest.mark.usefixtures("clean_cache_dir")
+class TestConfig:
+    @staticmethod
+    def create_dummy_zip(filename: str) -> bytes:
+        with io.BytesIO() as zip_buffer:
+            with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_ref:
+                zip_ref.writestr(filename, "foobar")
+            return zip_buffer.getvalue()
+
+    @staticmethod
+    def create_and_verify_backup(admin_dir: str, must_haves: list[str]):
+        # Create the backup
+        config_backup_path = config.create_config_backup()
+        assert os.path.exists(config_backup_path)
+        assert sabnzbd.__version__ in config_backup_path
+        assert time.strftime("%Y.%m.%d_%H") in config_backup_path
+
+        # Verify the zipfile has the expected content
+        with open(config_backup_path, "rb") as fp:
+            # Do basic backup validation
+            assert config.validate_config_backup(fp.read())
+            # Reset the file pointer
+            fp.seek(0)
+            with zipfile.ZipFile(fp, "r") as zip:
+                for basename in must_haves:
+                    assert zip.getinfo(basename)
+                # The history database is stored as an online snapshot, not a raw file copy
+                if DB_HISTORY_NAME in must_haves:
+                    assert zip.read(DB_HISTORY_NAME) == FAKE_HISTORY_SNAPSHOT
+                # Make sure there's nothing else in the zip
+                assert (zip_len := len(zip.filelist)) == len(must_haves)
+
+        # Move the current admin dir out of the way
+        stowed_admin = os.path.join(SAB_CACHE_DIR, "stowed_admin")
+        if os.path.isdir(stowed_admin):
+            filesystem.remove_all(stowed_admin)
+            assert not os.path.exists(stowed_admin)
+        os.rename(admin_dir, stowed_admin)
+        assert os.path.exists(stowed_admin)
+        assert filesystem.globber(stowed_admin) != []
+        assert not os.path.exists(admin_dir)
+        filesystem.create_all_dirs(admin_dir)
+        assert os.path.exists(admin_dir)
+        assert filesystem.globber(admin_dir) == []
+
+        # Store current test settings, as these may change when restoring a backup
+        restore_me = {setting: getattr(sabnzbd.cfg, setting)() for setting in CONFIG_BACKUP_HTTPS.values()}
+
+        # Restore the backup
+        with open(config_backup_path, "rb") as config_backup_fp:
+            config.restore_config_backup(config_backup_fp.read())
+
+        # Check settings results
+        restore_changed_settings = False
+        for filename, setting in CONFIG_BACKUP_HTTPS.items():
+            if filename in must_haves:
+                restore_changed_settings = True
+                value = getattr(sabnzbd.cfg, setting)()
+                if setting != "https_chain":
+                    # All https settings should point to the default basenames of the restored files...
+                    assert value == getattr(sabnzbd.cfg, setting).default
+                else:
+                    # ...except the one that doesn't have a default and uses a hardcoded filename instead
+                    assert value == DEF_CHAIN_FILE
+        # Check filename results
+        for basename in must_haves:
+            # Verify all files in the backup were restored into the admin dir...
+            assert os.path.exists(os.path.join(admin_dir, basename))
+            # ...and nothing else
+            if not restore_changed_settings:
+                assert zip_len == len(filesystem.globber(admin_dir))
+            else:
+                # Account for sabnzbd.ini.bak in case settings were changed as part of the restore
+                assert zip_len + 1 == len(filesystem.globber(admin_dir))
+
+        # Restore the test settings
+        for setting, value in restore_me.items():
+            getattr(sabnzbd.cfg, setting).set(value)
+        sabnzbd.config.save_config(True)
+
+        # Purge the backup file to prevent collisions
+        os.unlink(config_backup_path)
+        assert not os.path.exists(config_backup_path)
+
+        # Call the original admin dir back into active duty
+        filesystem.remove_all(admin_dir)
+        assert not os.path.exists(admin_dir)
+        os.rename(stowed_admin, admin_dir)
+        assert os.path.exists(admin_dir)
+        assert filesystem.globber(admin_dir) != []
+        assert not os.path.exists(stowed_admin)
+
+    def test_validate_config_backup(self):
+        """Validate basic dummy data"""
+        assert not config.validate_config_backup(b"invalid")
+        assert not config.validate_config_backup(self.create_dummy_zip("dummyfile"))
+        assert config.validate_config_backup(self.create_dummy_zip(DEF_INI_FILE))
+
+    @pytest.mark.config(
+        {
+            "admin_dir": os.path.join(SAB_CACHE_DIR, "test_config_restore_protected"),
+            "local_ranges": ["10.0.0.0/8"],
+        }
+    )
+    def test_config_restore_keeps_protected(self):
+        """Protected settings cannot be changed remotely, so also not by restoring a backup"""
+        admin_dir = sabnzbd.cfg.admin_dir.get_path()
+        ini_path = os.path.join(admin_dir, DEF_INI_FILE)
+        shutil.copyfile(os.path.join(SAB_DATA_DIR, "sabnzbd.basic.ini"), ini_path)
+        config.read_config(ini_path)
+        assert not sabnzbd.cfg.email_dir()
+        assert sabnzbd.cfg.local_ranges() == ["10.0.0.0/8"]
+
+        backup_ini = "[misc]\nemail_dir = %s\nlocal_ranges = 0.0.0.0/0,\ncache_limit = 123M\n" % SAB_COMPLETE_DIR
+        with io.BytesIO() as zip_buffer:
+            with zipfile.ZipFile(zip_buffer, "w") as zip_ref:
+                zip_ref.writestr(DEF_INI_FILE, backup_ini)
+            config.restore_config_backup(zip_buffer.getvalue())
+
+        # Other settings are restored, the protected ones keep their current value
+        assert sabnzbd.cfg.cache_limit() == "123M"
+        assert not sabnzbd.cfg.email_dir()
+        assert sabnzbd.cfg.local_ranges() == ["10.0.0.0/8"]
+        # The backup's protected values never reach the INI on disk
+        ini_on_disk = configobj.ConfigObj(ini_path, encoding="utf-8")
+        assert ini_on_disk["misc"]["cache_limit"] == "123M"
+        assert ini_on_disk["misc"].get("email_dir", "") == ""
+        assert "0.0.0.0/0" not in ini_on_disk["misc"].get("local_ranges", [])
+
+    @pytest.mark.parametrize(
+        "par_option, threads, file_threads",
+        [
+            ("par_option = -t4 -T 2 -N", 4, 2),
+            ("par_option = -T8", 0, 8),
+            ("par_option = -N -v", 0, 0),
+            ("par_option = -t4, -T2", 4, 2),
+            ("par_option = -t3,", 3, 0),
+            ("par_option = ", 0, 0),
+            ("", 0, 0),
+        ],
+    )
+    def test_par_option_conversion(self, tmp_path, par_option, threads, file_threads):
+        ini_path = os.path.join(tmp_path, DEF_INI_FILE)
+        with open(ini_path, "w") as ini:
+            ini.write("[misc]\nconfig_conversion_version = 5\n%s\n" % par_option)
+        config.read_config(ini_path)
+        try:
+            sabnzbd.cfg.config_conversions()
+            assert sabnzbd.cfg.par2_threads() == threads
+            assert sabnzbd.cfg.par2_file_threads() == file_threads
+            assert sabnzbd.cfg.config_conversion_version() == 6
+            assert "par_option" not in configobj.ConfigObj(ini_path, encoding="utf-8")["misc"]
+        finally:
+            sabnzbd.cfg.par2_threads.set(0)
+            sabnzbd.cfg.par2_file_threads.set(0)
+
+    def test_par_option_conversion_without_misc_section(self, tmp_path):
+        ini_path = os.path.join(tmp_path, DEF_INI_FILE)
+        with open(ini_path, "w") as ini:
+            ini.write("[logging]\n")
+        config.read_config(ini_path)
+        sabnzbd.cfg.config_conversion_version.set(5)
+        sabnzbd.cfg.config_conversions()
+        assert sabnzbd.cfg.config_conversion_version() == 6
+        assert sabnzbd.cfg.par2_threads() == 0
+
+    def test_remove_protected_options(self):
+        ini_data = (
+            b"__version__ = 19\n[misc]\nemail_dir = /tmp/templates\nlocal_ranges = 0.0.0.0/0,\n"
+            b"inet_exposure = 5\ncache_limit = 1G\n"
+        )
+        result = config.CONFIG.remove_protected_options(ini_data)
+        assert b"email_dir" not in result
+        assert b"local_ranges" not in result
+        assert b"inet_exposure" not in result
+        assert b"cache_limit = 1G" in result
+        assert b"__version__ = 19" in result
+
+    @pytest.mark.config(
+        {
+            "admin_dir": os.path.join(SAB_CACHE_DIR, "test_config_backup"),
+            "complete_dir": os.path.join(SAB_COMPLETE_DIR, "test_config_backup"),
+        }
+    )
+    def test_config_backup(self, monkeypatch):
+        """Combined tests for the config.{create,validate,restore}_config_backup functions"""
+        monkeypatch.setattr(sabnzbd, "CONFIG_BACKUP_HTTPS_OK", [])
+        monkeypatch.setattr(sabnzbd.database, "history_db_snapshot", lambda: FAKE_HISTORY_SNAPSHOT)
+
+        # Prepare the basics
+        admin_dir = sabnzbd.cfg.admin_dir.get_path()
+        sabnzbd.cfg.set_root_folders2()
+        ini_path = os.path.join(admin_dir, DEF_INI_FILE)
+        shutil.copyfile(os.path.join(SAB_DATA_DIR, "sabnzbd.basic.ini"), ini_path)
+        assert os.path.exists(ini_path)
+        config.read_config(ini_path)
+        filesystem.create_all_dirs(sabnzbd.cfg.complete_dir())
+        assert os.path.exists(sabnzbd.cfg.complete_dir())
+
+        # Create a backup and verify it has the expected files (ini only, as there are no admin and https config files)
+        self.create_and_verify_backup(admin_dir, [DEF_INI_FILE])
+
+        # Add other admin files that qualify for inclusion in backups
+        for basename in CONFIG_BACKUP_FILES:
+            with open(admin_file := os.path.join(admin_dir, basename), "wb") as fp:
+                fp.write(os.urandom(128))
+            assert os.path.exists(admin_file)
+        self.create_and_verify_backup(admin_dir, [DEF_INI_FILE, *CONFIG_BACKUP_FILES])
+
+        # Add some useless files in the admin_dir
+        for basename in ["totals3.sab", "Best.Movie.Ever.1951.240p.avi", "Rating.sab"]:
+            with open(useless_file := os.path.join(admin_dir, basename), "wb") as fp:
+                fp.write(os.urandom(256))
+            assert os.path.exists(useless_file)
+        # None of these should appear in the backup
+        self.create_and_verify_backup(admin_dir, [DEF_INI_FILE, *CONFIG_BACKUP_FILES])
+
+        # Remove the extra admin files, but keep the useless ones around
+        for basename in CONFIG_BACKUP_FILES:
+            os.unlink(admin_file := os.path.join(admin_dir, basename))
+            assert not os.path.exists(admin_file)
+
+        # Generate fake HTTPS certificate and key files
+        cert_file = os.path.join(admin_dir, DEF_HTTPS_CERT_FILE)
+        key_file = os.path.join(admin_dir, DEF_HTTPS_KEY_FILE)
+        for filepath in (cert_file, key_file):
+            with open(filepath, "wb") as fp:
+                fp.write(os.urandom(512))
+        assert os.path.exists(cert_file)
+        assert os.path.exists(key_file)
+
+        # Copy cert and key to create a second set of https config files outside the admin dir
+        other_cert_file = long_path(os.path.join(SAB_CACHE_DIR, "foobar.mycert"))
+        other_key_file = long_path(os.path.join(SAB_CACHE_DIR, "foobar.mykey"))
+        shutil.copyfile(cert_file, other_key_file)
+        shutil.copyfile(key_file, other_cert_file)
+        assert os.path.exists(other_cert_file)
+        assert os.path.exists(other_key_file)
+
+        # Imitate a mainstream https setup (cert and key present, but no chain file)
+        sabnzbd.cfg.enable_https.set(True)
+        sabnzbd.cfg.https_cert.set(DEF_HTTPS_CERT_FILE)
+        sabnzbd.cfg.https_key.set(DEF_HTTPS_KEY_FILE)
+        sabnzbd.config.save_config(True)
+        assert not sabnzbd.cfg.https_chain()
+        assert sabnzbd.CONFIG_BACKUP_HTTPS_OK == []
+
+        # Results should remain the same, as we didn't fake the results of a startup with https enabled yet
+        self.create_and_verify_backup(admin_dir, [DEF_INI_FILE])
+
+        # Results should still remain the same, the startup data lists only bogus files
+        sabnzbd.CONFIG_BACKUP_HTTPS_OK = ["/tmp/no.cert", "/lib/fuldstændig_falsk.nøgle", "/etc/存在しないファイル"]
+        self.create_and_verify_backup(admin_dir, [DEF_INI_FILE])
+
+        # Now pretend the program started with this config (note: full paths must be used for _OK)
+        sabnzbd.CONFIG_BACKUP_HTTPS_OK = [cert_file, key_file]
+        self.create_and_verify_backup(admin_dir, [DEF_INI_FILE, DEF_HTTPS_CERT_FILE, DEF_HTTPS_KEY_FILE])
+
+        # Pretend some other files were loaded on startup instead
+        sabnzbd.CONFIG_BACKUP_HTTPS_OK = [other_cert_file, other_key_file]
+        # Files in the settings no longer match those in _OK; no https config should be in the backup
+        self.create_and_verify_backup(admin_dir, [DEF_INI_FILE])
+
+        # Set the full path to a key and cert file outside the admin dir
+        sabnzbd.cfg.https_cert.set(other_cert_file)
+        sabnzbd.cfg.https_key.set(other_key_file)
+        sabnzbd.config.save_config(True)
+        # Now the files should be included, albeit under the default names
+        self.create_and_verify_backup(admin_dir, [DEF_INI_FILE, DEF_HTTPS_CERT_FILE, DEF_HTTPS_KEY_FILE])
+
+        # Repeat with the "others" removed, so there's nothing (but the ini) left to include in the first place
+        for f in (other_cert_file, other_key_file):
+            os.unlink(f)
+        assert not os.path.exists(other_cert_file)
+        assert not os.path.exists(other_key_file)
+        self.create_and_verify_backup(admin_dir, [DEF_INI_FILE])
+
+        # Make up a chain file
+        chain_file = os.path.join(admin_dir, "ssl-chain.txt")
+        shutil.copyfile(cert_file, chain_file)
+        assert os.path.exists(chain_file)
+        # Update the config and the startup record (mostly)
+        sabnzbd.cfg.https_cert.set(cert_file)
+        sabnzbd.cfg.https_key.set(key_file)
+        sabnzbd.cfg.https_chain.set(chain_file)
+        sabnzbd.config.save_config(True)
+        sabnzbd.CONFIG_BACKUP_HTTPS_OK = [cert_file, key_file]
+
+        # There may be a chain file now, but as long as it's not listed in _OK it should be excluded from the backup
+        self.create_and_verify_backup(admin_dir, [DEF_INI_FILE, DEF_HTTPS_CERT_FILE, DEF_HTTPS_KEY_FILE])
+
+        # Now it should be included
+        sabnzbd.CONFIG_BACKUP_HTTPS_OK.append(chain_file)
+        self.create_and_verify_backup(
+            admin_dir, [DEF_INI_FILE, DEF_HTTPS_CERT_FILE, DEF_HTTPS_KEY_FILE, DEF_CHAIN_FILE]
+        )
+
+        # Same same but more lonely
+        sabnzbd.CONFIG_BACKUP_HTTPS_OK = [chain_file, "/tmp/foobar.exe"]
+        self.create_and_verify_backup(admin_dir, [DEF_INI_FILE, DEF_CHAIN_FILE])
+
+        # Disabling https shouldn't make any difference as long as the evidence shows it was active on startup
+        sabnzbd.cfg.enable_https.set(False)
+        sabnzbd.config.save_config(True)
+        self.create_and_verify_backup(admin_dir, [DEF_INI_FILE, DEF_CHAIN_FILE])

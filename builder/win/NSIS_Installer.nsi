@@ -1,6 +1,6 @@
-; -*- coding: utf-8 -*-
+﻿; -*- coding: utf-8 -*-
 ;
-; Copyright 2008-2015 The SABnzbd-Team <team@sabnzbd.org>
+; Copyright 2008-2015 The SABnzbd-Team (sabnzbd.org)
 ;
 ; This program is free software; you can redistribute it and/or
 ; modify it under the terms of the GNU General Public License
@@ -18,6 +18,10 @@
 
 Unicode true
 
+; Must precede any data/header output. Solid LZMA dedups identical files (e.g. the
+; two SABnzbd*.pkg archives) and shrinks the whole installer.
+SetCompressor /SOLID lzma
+
 !addplugindir builder\win\nsis\Plugins
 !addincludedir builder\win\nsis\Include
 
@@ -29,10 +33,11 @@ Unicode true
 !include "nsProcess.nsh"
 !include "x64.nsh"
 !include "servicelib.nsh"
+!include "StdUtils.nsh"
 
 ;------------------------------------------------------------------
 ;
-; Marco for removing existing and the current installation
+; Macro for removing existing and the current installation
 ; It shared by the installer and the uninstaller.
 ;
 !define RemovePrev "!insertmacro RemovePrev"
@@ -42,21 +47,54 @@ Unicode true
   RMDir /r "${idir}"
 !macroend
 
+!define RemovePrevShortcuts "!insertmacro RemovePrevShortcuts"
+!macro RemovePrevShortcuts
+  ; Remove shortcuts, starting with current user ones (from old installs)
+  SetShellVarContext current
+  !insertmacro MUI_STARTMENU_GETFOLDER Application $MUI_TEMP
+  Delete "$SMPROGRAMS\$MUI_TEMP\SABnzbd.lnk"
+  Delete "$SMPROGRAMS\$MUI_TEMP\Uninstall.lnk"
+  Delete "$SMPROGRAMS\$MUI_TEMP\SABnzbd - SafeMode.lnk"
+  Delete "$SMPROGRAMS\$MUI_TEMP\SABnzbd - Documentation.url"
+  RMDir  "$SMPROGRAMS\$MUI_TEMP"
+  Delete "$SMPROGRAMS\Startup\SABnzbd.lnk"
+  Delete "$DESKTOP\SABnzbd.lnk"
+
+  SetShellVarContext all
+  !insertmacro MUI_STARTMENU_GETFOLDER Application $MUI_TEMP
+  Delete "$SMPROGRAMS\$MUI_TEMP\SABnzbd.lnk"
+  Delete "$SMPROGRAMS\$MUI_TEMP\Uninstall.lnk"
+  Delete "$SMPROGRAMS\$MUI_TEMP\SABnzbd - SafeMode.lnk"
+  Delete "$SMPROGRAMS\$MUI_TEMP\SABnzbd - Documentation.url"
+  RMDir  "$SMPROGRAMS\$MUI_TEMP"
+  Delete "$SMPROGRAMS\Startup\SABnzbd.lnk"
+  Delete "$DESKTOP\SABnzbd.lnk"
+!macroend
+
 ;------------------------------------------------------------------
 ; Define names of the product
-  Name "${SAB_PRODUCT}"
+  Name "SABnzbd ${SAB_VERSION}"
+  VIProductVersion "${SAB_VERSIONKEY}"
+  VIFileVersion "${SAB_VERSIONKEY}"
+
+  VIAddVersionKey "Comments" "SABnzbd ${SAB_VERSION}"
+  VIAddVersionKey "CompanyName" "The SABnzbd-Team"
+  VIAddVersionKey "FileDescription" "SABnzbd ${SAB_VERSION}"
+  VIAddVersionKey "FileVersion" "${SAB_VERSION}"
+  VIAddVersionKey "LegalCopyright" "The SABnzbd-Team"
+  VIAddVersionKey "ProductName" "SABnzbd ${SAB_VERSION}"
+  VIAddVersionKey "ProductVersion" "${SAB_VERSION}"
+
   OutFile "${SAB_FILE}"
   InstallDir "$PROGRAMFILES\SABnzbd"
 
-
 ;------------------------------------------------------------------
 ; Some default compiler settings (uncomment and change at will):
-  SetCompress auto ; (can be off or force)
   SetDatablockOptimize on ; (can be off)
   CRCCheck on ; (can be off)
   AutoCloseWindow false ; (can be true for the window go away automatically at end)
   ShowInstDetails hide ; (can be show to have them shown, or nevershow to disable)
-  SetDateSave off ; (can be on to have files restored to their orginal date)
+  SetDateSave off ; (can be on to have files restored to their original date)
   WindowIcon on
   SpaceTexts none
 
@@ -65,7 +103,6 @@ Unicode true
 ; Vista/Win7 redirects $SMPROGRAMS to all users without this
   RequestExecutionLevel admin
   FileErrorText "If you have no admin rights, try to install into a user directory."
-
 
 ;------------------------------------------------------------------
 ;Variables
@@ -106,10 +143,10 @@ Unicode true
   !insertmacro MUI_PAGE_STARTMENU Application $STARTMENU_FOLDER
 
   !insertmacro MUI_PAGE_INSTFILES
-  ; !define MUI_FINISHPAGE_RUN
-  ; !define MUI_FINISHPAGE_RUN_FUNCTION PageFinishRun
-  ; !define MUI_FINISHPAGE_RUN_TEXT $(MsgRunSAB)
-  !define MUI_FINISHPAGE_SHOWREADME "$INSTDIR\README.txt"
+  !define MUI_FINISHPAGE_RUN
+  !define MUI_FINISHPAGE_RUN_FUNCTION PageFinishRun
+  !define MUI_FINISHPAGE_RUN_TEXT $(MsgRunSAB)
+  !define MUI_FINISHPAGE_SHOWREADME "$INSTDIR\README.html"
   !define MUI_FINISHPAGE_SHOWREADME_TEXT $(MsgShowRelNote)
   !define MUI_FINISHPAGE_LINK $(MsgSupportUs)
   !define MUI_FINISHPAGE_LINK_LOCATION "https://sabnzbd.org/donate"
@@ -117,16 +154,25 @@ Unicode true
   !insertmacro MUI_PAGE_FINISH
 
   !insertmacro MUI_UNPAGE_CONFIRM
-  !define MUI_UNPAGE_COMPONENTSPAGE_NODESC
   !insertmacro MUI_UNPAGE_COMPONENTS
   !insertmacro MUI_UNPAGE_INSTFILES
 
+
 ;------------------------------------------------------------------
 ; Run as user-level at end of install
-; DOES NOT WORK
-; Function PageFinishRun
-;   !insertmacro UAC_AsUser_ExecShell "" "$INSTDIR\SABnzbd.exe" "" "" ""
-; FunctionEnd
+Function PageFinishRun
+  ; Check if SABnzbd service is installed
+  !insertmacro SERVICE "installed" "SABnzbd" ""
+  Pop $0 ;response
+  ${If} $0 == true
+    ; Service is installed, start the service
+    !insertmacro SERVICE "start" "SABnzbd" ""
+    Pop $0
+  ${Else}
+    ; Service not installed, run executable as user
+    ${StdUtils.ExecShellAsUser} $0 "$INSTDIR\SABnzbd.exe" "" ""
+  ${EndIf}
+FunctionEnd
 
 
 ;------------------------------------------------------------------
@@ -142,16 +188,17 @@ Unicode true
   !insertmacro MUI_LANGUAGE "Polish"
   !insertmacro MUI_LANGUAGE "Swedish"
   !insertmacro MUI_LANGUAGE "Danish"
+  !insertmacro MUI_LANGUAGE "Italian"
   !insertmacro MUI_LANGUAGE "Norwegian"
   !insertmacro MUI_LANGUAGE "Romanian"
   !insertmacro MUI_LANGUAGE "Spanish"
   !insertmacro MUI_LANGUAGE "PortugueseBR"
   !insertmacro MUI_LANGUAGE "Serbian"
+  !insertmacro MUI_LANGUAGE "Turkish"
   !insertmacro MUI_LANGUAGE "Hebrew"
   !insertmacro MUI_LANGUAGE "Russian"
   !insertmacro MUI_LANGUAGE "Czech"
   !insertmacro MUI_LANGUAGE "SimpChinese"
-
 
 
 ;------------------------------------------------------------------
@@ -169,37 +216,77 @@ Unicode true
 Section "SABnzbd" SecDummy
 
   SetOutPath "$INSTDIR"
+  SetShellVarContext all
+
+  DetailPrint $(MsgShutting)
+
+  ;------------------------------------------------------------------
+  ; Shutdown any running service
+
+  !insertmacro SERVICE "stop" "SABnzbd" ""
+  Pop $0
+
+  ;------------------------------------------------------------------
+  ; Terminate SABnzbd.exe
+  ; Ask nicely first, but kill forcefully if it does not exit in time
+  StrCpy $R1 0
+  loop:
+    ${nsProcess::FindProcess} "SABnzbd.exe" $R0
+    StrCmp $R0 0 0 endcheck
+    IntCmp $R1 20 forcekill 0 forcekill
+    ${nsProcess::CloseProcess} "SABnzbd.exe" $R0
+    IntOp $R1 $R1 + 1
+    Sleep 500
+    Goto loop
+  forcekill:
+    ${nsProcess::KillProcess} "SABnzbd.exe" $R0
+    Sleep 500
+  endcheck:
+  ${nsProcess::Unload}
 
   ;------------------------------------------------------------------
   ; Make sure old versions are gone (reg-key already read in onInt)
   StrCmp $PREV_INST_DIR "" noPrevInstallRemove
+    ; Only remove the directory if it actually contains a SABnzbd installation,
+    ; the registry value could point anywhere
+    IfFileExists "$PREV_INST_DIR\SABnzbd.exe" 0 noPrevInstallRemove
     ${RemovePrev} "$PREV_INST_DIR"
+    Goto continueSetupAfterRemove
+
+  ;------------------------------------------------------------------
+  ; Add firewall rules for new installs
   noPrevInstallRemove:
+    liteFirewallW::AddRule "$INSTDIR\SABnzbd.exe" "SABnzbd"
+    liteFirewallW::AddRule "$INSTDIR\SABnzbd-console.exe" "SABnzbd-console"
+
+  continueSetupAfterRemove:
 
   ; add files / whatever that need to be installed here.
   File /r "dist\SABnzbd\*"
 
   ;------------------------------------------------------------------
-  ; Add firewall rules
-  liteFirewallW::AddRule "$INSTDIR\SABnzbd.exe" "SABnzbd"
-  liteFirewallW::AddRule "$INSTDIR\SABnzbd-console.exe" "SABnzbd-console"
-
-  ;------------------------------------------------------------------
-  ; Add to registery
+  ; Add to registry
   WriteRegStr HKEY_LOCAL_MACHINE "SOFTWARE\SABnzbd" "" "$INSTDIR"
   WriteRegStr HKEY_LOCAL_MACHINE "SOFTWARE\SABnzbd" "Installer Language" "$(MsgLangCode)"
   WriteRegStr HKEY_LOCAL_MACHINE "Software\Microsoft\Windows\CurrentVersion\Uninstall\SABnzbd" "DisplayName" "SABnzbd ${SAB_VERSION}"
   WriteRegStr HKEY_LOCAL_MACHINE "Software\Microsoft\Windows\CurrentVersion\Uninstall\SABnzbd" "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegStr HKEY_LOCAL_MACHINE "Software\Microsoft\Windows\CurrentVersion\Uninstall\SABnzbd" "DisplayVersion" '${SAB_VERSION}'
-  WriteRegStr HKEY_LOCAL_MACHINE "Software\Microsoft\Windows\CurrentVersion\Uninstall\SABnzbd" "Publisher" 'The SABnzbd Team'
+  WriteRegStr HKEY_LOCAL_MACHINE "Software\Microsoft\Windows\CurrentVersion\Uninstall\SABnzbd" "Publisher" 'The SABnzbd-Team'
   WriteRegStr HKEY_LOCAL_MACHINE "Software\Microsoft\Windows\CurrentVersion\Uninstall\SABnzbd" "HelpLink" 'https://forums.sabnzbd.org/'
   WriteRegStr HKEY_LOCAL_MACHINE "Software\Microsoft\Windows\CurrentVersion\Uninstall\SABnzbd" "URLInfoAbout" 'https://sabnzbd.org/wiki/'
   WriteRegStr HKEY_LOCAL_MACHINE "Software\Microsoft\Windows\CurrentVersion\Uninstall\SABnzbd" "URLUpdateInfo" 'https://sabnzbd.org/'
   WriteRegStr HKEY_LOCAL_MACHINE "Software\Microsoft\Windows\CurrentVersion\Uninstall\SABnzbd" "Comments" 'The automated Usenet download tool'
   WriteRegStr HKEY_LOCAL_MACHINE "Software\Microsoft\Windows\CurrentVersion\Uninstall\SABnzbd" "DisplayIcon" '$INSTDIR\icons\sabnzbd.ico'
-  WriteRegDWORD HKEY_LOCAL_MACHINE "Software\Microsoft\Windows\CurrentVersion\Uninstall\SABnzbd" "EstimatedSize"  25674
+
+  ; Calculate the actual installed size for Add/Remove Programs
+  ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
+  WriteRegDWORD HKEY_LOCAL_MACHINE "Software\Microsoft\Windows\CurrentVersion\Uninstall\SABnzbd" "EstimatedSize" "$0"
   WriteRegDWORD HKEY_LOCAL_MACHINE "Software\Microsoft\Windows\CurrentVersion\Uninstall\SABnzbd" "NoRepair" -1
   WriteRegDWORD HKEY_LOCAL_MACHINE "Software\Microsoft\Windows\CurrentVersion\Uninstall\SABnzbd" "NoModify" -1
+
+  WriteRegStr HKEY_CURRENT_USER "Software\Classes\AppUserModelId\SABnzbd" "DisplayName" "SABnzbd"
+  WriteRegStr HKEY_CURRENT_USER "Software\Classes\AppUserModelId\SABnzbd" "IconUri" '$INSTDIR\icons\sabnzbd16_32.ico'
+
   ; write out uninstaller
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
@@ -232,23 +319,28 @@ Function .onInit
   ${If} ${RunningX64}
       StrCpy $INSTDIR "$PROGRAMFILES64\SABnzbd"
   ${Else}
-      MessageBox MB_OK $(MsgOnly64bit)
-      ExecShell "open" "https://sabnzbd.org/downloads"
+      MessageBox MB_OK|MB_ICONSTOP $(MsgOnly64bit)
       Abort
   ${EndIf}
 
   ; Python 3.9 no longer supports Windows 7
   ${If} ${AtMostWin8}
-      MessageBox MB_OK $(MsgNoWin7)
-      ExecShell "open" "https://sabnzbd.org/downloads"
+      MessageBox MB_OK|MB_ICONSTOP $(MsgNoWin7)
       Abort
+  ${EndIf}
+
+  ; Inform ARM64 users that a native ARM64 build is available
+  ${If} ${IsNativeARM64}
+      MessageBox MB_OKCANCEL|MB_ICONINFORMATION $(MsgARM64Notice) IDOK continueARM64
+      Abort
+      continueARM64:
   ${EndIf}
 
   ;------------------------------------------------------------------
   ; Change settings based on if SAB was already installed
   ReadRegStr $PREV_INST_DIR HKEY_LOCAL_MACHINE "SOFTWARE\SABnzbd" ""
   StrCmp $PREV_INST_DIR "" noPrevInstall
-    ; We want to use the user's costom dir if he used one
+    ; We want to use the user's custom dir if he used one
     StrCmp $PREV_INST_DIR "$PROGRAMFILES\SABnzbd" noSpecialDir
       StrCmp $PREV_INST_DIR "$PROGRAMFILES64\SABnzbd" noSpecialDir
         ; Set what the user had before
@@ -257,15 +349,24 @@ Function .onInit
 
     ;------------------------------------------------------------------
     ; Check what the user has currently set for install options
+    SetShellVarContext current
+    IfFileExists "$SMPROGRAMS\Startup\SABnzbd.lnk" 0 endCheckStartupCurrent
+      SectionSetFlags ${startup} 1
+    endCheckStartupCurrent:
+    SetShellVarContext all
     IfFileExists "$SMPROGRAMS\Startup\SABnzbd.lnk" 0 endCheckStartup
       SectionSetFlags ${startup} 1
     endCheckStartup:
 
+    SetShellVarContext current
     IfFileExists "$DESKTOP\SABnzbd.lnk" endCheckDesktop 0
-      SectionSetFlags ${desktop} 0 ; SAB is installed but desktop-icon not, so uncheck it
+      ; If not present for current user, first check all user folder
+      SetShellVarContext all
+      IfFileExists "$DESKTOP\SABnzbd.lnk" endCheckDesktop 0
+        SectionSetFlags ${desktop} 0 ; SAB is installed but desktop-icon not, so uncheck it
     endCheckDesktop:
+    SetShellVarContext all
 
-    Push $1
     ReadRegStr $1 HKCR ".nzb" ""  ; read current file association
     StrCmp "$1" "NZB File" noPrevInstall 0
       SectionSetFlags ${assoc} 0 ; Uncheck it when it wasn't checked before
@@ -275,85 +376,59 @@ Function .onInit
   ; Display language chooser
   !insertmacro MUI_LANGDLL_DISPLAY
 
-  ;------------------------------------------------------------------
-  ; make sure user terminates sabnzbd.exe or else abort
-  ;
-  loop:
-    ${nsProcess::FindProcess} "SABnzbd.exe" $R0
-    StrCmp $R0 0 0 endcheck
-    MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION $(MsgCloseSab) IDOK loop IDCANCEL exitinstall
-    exitinstall:
-      ${nsProcess::Unload}
-      Abort
-  endcheck:
-
-  ;------------------------------------------------------------------
-  ; make sure both services aren't running
-  ;
-  !insertmacro SERVICE "running" "SABnzbd" ""
-  Pop $0 ;response
-  !insertmacro SERVICE "running" "SABHelper" ""
-  Pop $1
-  ${If} $0 == true
-  ${OrIf} $1 == true
-    MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION $(MsgCloseSab) IDOK loop IDCANCEL exitinstall
-    ; exitinstall already defined above
-  ${EndIf}
-
-  ;------------------------------------------------------------------
-  ; Tell users about the service change
-  ;
-  !insertmacro SERVICE "installed" "SABHelper" ""
-  Pop $0 ;response
-  ${If} $0 == true
-    MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION $(MsgServChange) IDOK removeservices IDCANCEL exitinstall
-    ; exitinstall already defined above
-    removeservices:
-        !insertmacro SERVICE "delete" "SABHelper" ""
-        !insertmacro SERVICE "delete" "SABnzbd" ""
-  ${EndIf}
-
-FunctionEnd
-
-;------------------------------------------------------------------
-; Show the shortcuts at end of install so user can start SABnzbd
-; This is instead of us trying to run SAB from the installer
-;
-Function .onInstSuccess
-  ExecShell "open" "$SMPROGRAMS\$STARTMENU_FOLDER"
 FunctionEnd
 
 ;--------------------------------
 ; begin uninstall settings/section
 UninstallText $(MsgUninstall)
 
+; Uninstaller variants of the servicelib functions, needed by the SERVICE macro.
+; APITAG is undefined again at the end of servicelib.nsh, so redefine it here.
+!define APITAG "W"
+
+Function un.Service
+  !insertmacro FUNC_SERVICE "un."
+FunctionEnd
+
+Function un.GetParam
+  !insertmacro FUNC_GETPARAM
+FunctionEnd
+
+!undef APITAG
+
 Section "un.$(MsgDelProgram)" Uninstall
-;make sure sabnzbd.exe isnt running..if so shut it down
+;make sure sabnzbd.exe isn't running..if so shut it down
+  DetailPrint $(MsgShutting)
+
+  ; Stop and remove the SABnzbd service, if it is installed
+  !insertmacro SERVICE "installed" "SABnzbd" ""
+  Pop $0
+  ${If} $0 == true
+    !insertmacro SERVICE "stop" "SABnzbd" ""
+    Pop $0
+    !insertmacro SERVICE "delete" "SABnzbd" ""
+    Pop $0
+  ${EndIf}
+
   ${nsProcess::KillProcess} "SABnzbd.exe" $R0
   ${nsProcess::Unload}
-  DetailPrint "Process Killed"
-
 
   ; add delete commands to delete whatever files/registry keys/etc you installed here.
   Delete "$INSTDIR\uninstall.exe"
   DeleteRegKey HKEY_LOCAL_MACHINE "SOFTWARE\SABnzbd"
   DeleteRegKey HKEY_LOCAL_MACHINE "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\SABnzbd"
+  DeleteRegKey HKEY_CURRENT_USER "Software\Classes\AppUserModelId\SABnzbd"
+  DeleteRegKey HKEY_CURRENT_USER "Software\SABnzbd"
 
-  ${RemovePrev} "$INSTDIR"
+  ; Only remove the directory if it actually contains a SABnzbd installation
+  IfFileExists "$INSTDIR\SABnzbd.exe" 0 skipRemoveDir
+    ${RemovePrev} "$INSTDIR"
+  skipRemoveDir:
+  ${RemovePrevShortcuts}
 
-  !insertmacro MUI_STARTMENU_GETFOLDER Application $MUI_TEMP
-
-  Delete "$SMPROGRAMS\$MUI_TEMP\SABnzbd.lnk"
-  Delete "$SMPROGRAMS\$MUI_TEMP\Uninstall.lnk"
-  Delete "$SMPROGRAMS\$MUI_TEMP\SABnzbd - SafeMode.lnk"
-  Delete "$SMPROGRAMS\$MUI_TEMP\SABnzbd - Documentation.url"
-  RMDir  "$SMPROGRAMS\$MUI_TEMP"
-
-  Delete "$SMPROGRAMS\Startup\SABnzbd.lnk"
-
-  Delete "$DESKTOP\SABnzbd.lnk"
-
-  DeleteRegKey HKEY_CURRENT_USER  "Software\SABnzbd"
+  ; Remove firewall entries
+  liteFirewallW::RemoveRule "$INSTDIR\SABnzbd.exe" "SABnzbd"
+  liteFirewallW::RemoveRule "$INSTDIR\SABnzbd-console.exe" "SABnzbd-console"
 
   ${unregisterExtension} ".nzb" "NZB File"
   ${RefreshShellIcons}
@@ -361,8 +436,10 @@ Section "un.$(MsgDelProgram)" Uninstall
 SectionEnd ; end of uninstall section
 
 Section /o "un.$(MsgDelSettings)" DelSettings
-  DetailPrint "Uninstall settings $LOCALAPPDATA"
-  Delete "$LOCALAPPDATA\sabnzbd\sabnzbd.ini"
+  ; The main uninstall section leaves the context on "all", which would make
+  ; $LOCALAPPDATA point to C:\ProgramData instead of the user's profile
+  SetShellVarContext current
+  DetailPrint "Uninstall settings $LOCALAPPDATA\sabnzbd"
   RMDir /r "$LOCALAPPDATA\sabnzbd"
 SectionEnd
 
@@ -371,34 +448,284 @@ SectionEnd
 ;--------------------------------
 ;Language strings
   LangString MsgShowRelNote ${LANG_ENGLISH} "Show Release Notes"
+  LangString MsgShowRelNote ${LANG_CZECH} "Zobrazit poznámky k vydání"
+  LangString MsgShowRelNote ${LANG_DANISH} "Vis udgivelsesbemærkninger"
+  LangString MsgShowRelNote ${LANG_GERMAN} "Versionshinweise anzeigen"
+  LangString MsgShowRelNote ${LANG_SPANISH} "Mostrar notas de la versión"
+  LangString MsgShowRelNote ${LANG_FINNISH} "Näytä julkaisutiedot"
+  LangString MsgShowRelNote ${LANG_FRENCH} "Afficher les notes de version"
+  LangString MsgShowRelNote ${LANG_HEBREW} "הראה הערות שחרור"
+  LangString MsgShowRelNote ${LANG_ITALIAN} "Mostra note di rilascio"
+  LangString MsgShowRelNote ${LANG_NORWEGIAN} "Vis versjonsmerknader"
+  LangString MsgShowRelNote ${LANG_DUTCH} "Toon opmerkingen bij deze uitgave"
+  LangString MsgShowRelNote ${LANG_POLISH} "Pokaż informacje o wydaniu"
+  LangString MsgShowRelNote ${LANG_PORTUGUESEBR} "Mostrar Notas de Lançamento"
+  LangString MsgShowRelNote ${LANG_ROMANIAN} "Arată Notele de Publicare"
+  LangString MsgShowRelNote ${LANG_RUSSIAN} "Показать заметки о выпуске"
+  LangString MsgShowRelNote ${LANG_SERBIAN} "Прикажи белешке о издању"
+  LangString MsgShowRelNote ${LANG_SWEDISH} "Visa releasenoteringar"
+  LangString MsgShowRelNote ${LANG_TURKISH} "Yayın Notlarını Göster"
+  LangString MsgShowRelNote ${LANG_SIMPCHINESE} "显示版本说明"
+
+  LangString MsgRunSAB      ${LANG_ENGLISH} "Run SABnzbd"
+  LangString MsgRunSAB      ${LANG_CZECH} "Spustit SABnzbd"
+  LangString MsgRunSAB      ${LANG_DANISH} "Kør SABnzbd"
+  LangString MsgRunSAB      ${LANG_GERMAN} "SABnzbd starten"
+  LangString MsgRunSAB      ${LANG_SPANISH} "Ejecutar SABnzbd"
+  LangString MsgRunSAB      ${LANG_FINNISH} "Käynnistä SABnzbd"
+  LangString MsgRunSAB      ${LANG_FRENCH} "Lancer SABnzbd"
+  LangString MsgRunSAB      ${LANG_HEBREW} "הפעל את SABnzbd"
+  LangString MsgRunSAB      ${LANG_ITALIAN} "Avvia SABnzbd"
+  LangString MsgRunSAB      ${LANG_NORWEGIAN} "Kjør SABnzbd"
+  LangString MsgRunSAB      ${LANG_DUTCH} "SABnzbd starten"
+  LangString MsgRunSAB      ${LANG_POLISH} "Uruchom SABnzbd"
+  LangString MsgRunSAB      ${LANG_PORTUGUESEBR} "Executar o SABnzbd"
+  LangString MsgRunSAB      ${LANG_ROMANIAN} "Rulați SABnzbd"
+  LangString MsgRunSAB      ${LANG_RUSSIAN} "Запустить SABnzbd"
+  LangString MsgRunSAB      ${LANG_SERBIAN} "Покрени SABnzbd"
+  LangString MsgRunSAB      ${LANG_SWEDISH} "Kör SABnzbd"
+  LangString MsgRunSAB      ${LANG_TURKISH} "SABnzbd'yi çalıştır"
+  LangString MsgRunSAB      ${LANG_SIMPCHINESE} "运行 SABnzbd"
 
   LangString MsgSupportUs   ${LANG_ENGLISH} "Support the project, Donate!"
+  LangString MsgSupportUs   ${LANG_CZECH} "Podpořte projekt!"
+  LangString MsgSupportUs   ${LANG_DANISH} "Støt projektet, donér!"
+  LangString MsgSupportUs   ${LANG_GERMAN} "Bitte unterstützen Sie das Projekt durch eine Spende!"
+  LangString MsgSupportUs   ${LANG_SPANISH} "¡Apoye el proyecto, haga una  donación!"
+  LangString MsgSupportUs   ${LANG_FINNISH} "Tue projektia, lahjoita!"
+  LangString MsgSupportUs   ${LANG_FRENCH} "Soutenez le projet, faites un don !"
+  LangString MsgSupportUs   ${LANG_HEBREW} "תמוך במיזם, תרום!"
+  LangString MsgSupportUs   ${LANG_ITALIAN} "Sostieni il progetto, dona!"
+  LangString MsgSupportUs   ${LANG_NORWEGIAN} "Støtt prosjektet, donèr!"
+  LangString MsgSupportUs   ${LANG_DUTCH} "Steun het project, doneer!"
+  LangString MsgSupportUs   ${LANG_POLISH} "Wspomóż projekt!"
+  LangString MsgSupportUs   ${LANG_PORTUGUESEBR} "Apoie o projeto. Faça uma doação!"
+  LangString MsgSupportUs   ${LANG_ROMANIAN} "Susţine proiectul, Donează!"
+  LangString MsgSupportUs   ${LANG_RUSSIAN} "Поддержите проект. Сделайте пожертвование!"
+  LangString MsgSupportUs   ${LANG_SERBIAN} "Подржите пројекат, дајте добровољан прилог!"
+  LangString MsgSupportUs   ${LANG_SWEDISH} "Donera och stöd detta projekt!"
+  LangString MsgSupportUs   ${LANG_TURKISH} "Projeye destek olun, Bağış Yapın!"
+  LangString MsgSupportUs   ${LANG_SIMPCHINESE} "支持该项目，捐助!"
 
-  LangString MsgCloseSab    ${LANG_ENGLISH} "Please close $\"SABnzbd.exe$\" first"
+  LangString MsgOnly64bit   ${LANG_ENGLISH} "SABnzbd only supports 64-bit Windows."
+  LangString MsgOnly64bit   ${LANG_CZECH} "SABnzbd podporuje pouze 64bitové Windows."
+  LangString MsgOnly64bit   ${LANG_DANISH} "SABnzbd understøtter kun 64-bit Windows."
+  LangString MsgOnly64bit   ${LANG_GERMAN} "SABnzbd unterstützt nur 64-Bit-Windows."
+  LangString MsgOnly64bit   ${LANG_SPANISH} "SABnzbd solo es compatible con Windows de 64 bits."
+  LangString MsgOnly64bit   ${LANG_FINNISH} "SABnzbd tukee vain 64-bittistä Windowsia."
+  LangString MsgOnly64bit   ${LANG_FRENCH} "SABnzbd n'est compatible qu'avec Windows 64 bits."
+  LangString MsgOnly64bit   ${LANG_HEBREW} "SABnzbd תומך רק במערכות Windows מסוג 64 סיביות."
+  LangString MsgOnly64bit   ${LANG_ITALIAN} "SABnzbd supporta solo Windows a 64 bit."
+  LangString MsgOnly64bit   ${LANG_NORWEGIAN} "SABnzbd støtter kun 64-bit Windows."
+  LangString MsgOnly64bit   ${LANG_DUTCH} "SABnzbd ondersteund alleen 64bit Windows."
+  LangString MsgOnly64bit   ${LANG_POLISH} "SABnzbd obsługuje tylko system Windows 64-bit."
+  LangString MsgOnly64bit   ${LANG_PORTUGUESEBR} "O SABnzbd oferece suporte apenas ao Windows de 64 bits."
+  LangString MsgOnly64bit   ${LANG_ROMANIAN} "SABnzbd acceptă doar Windows pe 64 de biți."
+  LangString MsgOnly64bit   ${LANG_RUSSIAN} "SABnzbd поддерживает только 64-битные версии Windows."
+  LangString MsgOnly64bit   ${LANG_SERBIAN} "SABnzbd подржава само 64‑битни Windows."
+  LangString MsgOnly64bit   ${LANG_SWEDISH} "SABnzbd stöder endast 64-bitars Windows."
+  LangString MsgOnly64bit   ${LANG_TURKISH} "SABnzbd sadece 64 bit Windows'u destekler."
+  LangString MsgOnly64bit   ${LANG_SIMPCHINESE} "SABnzbd 仅支持 64 位 Windows。"
 
-  LangString MsgServChange  ${LANG_ENGLISH} "The SABnzbd Windows Service changed in SABnzbd 3.0.0. $\nYou will need to reinstall the SABnzbd service. $\n$\nClick `OK` to remove the existing services or `Cancel` to cancel this upgrade."
+  LangString MsgNoWin7      ${LANG_ENGLISH} "SABnzbd only supports Windows 8.1 and above."
+  LangString MsgNoWin7      ${LANG_CZECH} "SABnzbd podporuje pouze Windows 8.1 a novější."
+  LangString MsgNoWin7      ${LANG_DANISH} "SABnzbd understøtter kun Windows 8.1 og nyere."
+  LangString MsgNoWin7      ${LANG_GERMAN} "SABnzbd unterstützt nur Windows 8.1 und höher."
+  LangString MsgNoWin7      ${LANG_SPANISH} "SABnzbd solo es compatible con Windows 8.1 y superiores."
+  LangString MsgNoWin7      ${LANG_FINNISH} "SABnzbd tukee vain Windows 8.1:tä ja uudempia."
+  LangString MsgNoWin7      ${LANG_FRENCH} "SABnzbd n'est compatible qu'avec Windows 8.1 et plus."
+  LangString MsgNoWin7      ${LANG_HEBREW} "SABnzbd תומך רק במערכות Windows 8.1 ומעלה."
+  LangString MsgNoWin7      ${LANG_ITALIAN} "SABnzbd supporta solo Windows 8.1 e versioni successive."
+  LangString MsgNoWin7      ${LANG_NORWEGIAN} "SABnzbd støtter kun Windows 8.1 og nyere."
+  LangString MsgNoWin7      ${LANG_DUTCH} "SABnzbd ondersteund alleen Windows 8.1 en hoger."
+  LangString MsgNoWin7      ${LANG_POLISH} "SABnzbd obsługuje tylko Windows 8.1 i nowsze."
+  LangString MsgNoWin7      ${LANG_PORTUGUESEBR} "O SABnzbd oferece suporte apenas ao Windows 8.1 e superior."
+  LangString MsgNoWin7      ${LANG_ROMANIAN} "SABnzbd acceptă doar Windows 8.1 și versiunile ulterioare."
+  LangString MsgNoWin7      ${LANG_RUSSIAN} "SABnzbd поддерживает только Windows 8.1 и более новые."
+  LangString MsgNoWin7      ${LANG_SERBIAN} "SABnzbd подржава само Windows 8.1 и новије."
+  LangString MsgNoWin7      ${LANG_SWEDISH} "SABnzbd stöder endast Windows 8.1 och senare."
+  LangString MsgNoWin7      ${LANG_TURKISH} "SABnzbd sadece Windows 8.1 ve üzerini destekler."
+  LangString MsgNoWin7      ${LANG_SIMPCHINESE} "SABnzbd 仅支持 Windows 8.1 及更高版本。"
 
-  LangString MsgOnly64bit   ${LANG_ENGLISH} "The installer only supports 64-bit Windows, use the standalone version to run on 32-bit Windows."
+  LangString MsgARM64Notice ${LANG_ENGLISH} "An ARM version of SABnzbd is available on our Downloads page. This installer only contains the regular version.$\nPress OK to continue or Cancel to exit."
+  LangString MsgARM64Notice ${LANG_CZECH} "Na naší stránce „Ke stažení“ je k dispozici verze SABnzbd pro architekturu ARM. Tento instalační program obsahuje pouze standardní verzi.$\nStiskněte tlačítko OK pro pokračování nebo Zrušit pro ukončení."
+  LangString MsgARM64Notice ${LANG_DANISH} "En ARM-version af SABnzbd er tilgængelig på vores downloadside. Dette installationsprogram indeholder kun den almindelige version.$\nTryk på OK for at fortsætte eller Annuller for at afslutte."
+  LangString MsgARM64Notice ${LANG_GERMAN} "Eine ARM-Version von SABnzbd ist auf unserer Downloads-Seite verfügbar. Dieses Installationsprogramm enthält nur die reguläre Version.$\nKlicken Sie auf OK, um fortzufahren, oder auf Abbrechen, um zu beenden."
+  LangString MsgARM64Notice ${LANG_SPANISH} "Hay una versión ARM de SABnzbd disponible en nuestra página de descargas. Este instalador solo contiene la versión normal.$\nPulsa Aceptar para continuar o Cancelar para salir."
+  LangString MsgARM64Notice ${LANG_FINNISH} "An ARM version of SABnzbd is available on our Downloads page. This installer only contains the regular version.$\nPress OK to continue or Cancel to exit."
+  LangString MsgARM64Notice ${LANG_FRENCH} "Une version ARM de SABnzbd est disponible sur notre page de téléchargement. Ce programme d'installation ne contient que la version standard.$\nCliquez sur OK pour continuer ou sur Annuler pour quitter."
+  LangString MsgARM64Notice ${LANG_HEBREW} "גרסת ARM של SABnzbd זמינה בעמוד ההורדות שלנו. תוכנת התקנה זו מכילה רק את הגרסה הרגילה.$\nלחץ על אישור כדי להמשיך או על ביטול כדי לצאת."
+  LangString MsgARM64Notice ${LANG_ITALIAN} "Una versione ARM di SABnzbd è disponibile nella nostra pagina dei download. Questo programma di installazione contiene solo la versione normale.$\nPremi OK per continuare o Annulla per uscire."
+  LangString MsgARM64Notice ${LANG_NORWEGIAN} "An ARM version of SABnzbd is available on our Downloads page. This installer only contains the regular version.$\nPress OK to continue or Cancel to exit."
+  LangString MsgARM64Notice ${LANG_DUTCH} "Er is een ARM versie van SABnzbd beschikbaar op onze Downloads pagina. Deze installatie bevat alleen de normale (niet-ARM) versie.$\nKlik OK om door te gaan of Annuleren om af te breken."
+  LangString MsgARM64Notice ${LANG_POLISH} "An ARM version of SABnzbd is available on our Downloads page. This installer only contains the regular version.$\nPress OK to continue or Cancel to exit."
+  LangString MsgARM64Notice ${LANG_PORTUGUESEBR} "An ARM version of SABnzbd is available on our Downloads page. This installer only contains the regular version.$\nPress OK to continue or Cancel to exit."
+  LangString MsgARM64Notice ${LANG_ROMANIAN} "An ARM version of SABnzbd is available on our Downloads page. This installer only contains the regular version.$\nPress OK to continue or Cancel to exit."
+  LangString MsgARM64Notice ${LANG_RUSSIAN} "An ARM version of SABnzbd is available on our Downloads page. This installer only contains the regular version.$\nPress OK to continue or Cancel to exit."
+  LangString MsgARM64Notice ${LANG_SERBIAN} "An ARM version of SABnzbd is available on our Downloads page. This installer only contains the regular version.$\nPress OK to continue or Cancel to exit."
+  LangString MsgARM64Notice ${LANG_SWEDISH} "An ARM version of SABnzbd is available on our Downloads page. This installer only contains the regular version.$\nPress OK to continue or Cancel to exit."
+  LangString MsgARM64Notice ${LANG_TURKISH} "SABnzbd'nin ARM sürümü İndirmeler sayfamızda mevcuttur. Bu kurulum programı sadece normal sürümü içermektedir.$\nDevam etmek için Tamam'a veya çıkmak için İptal'e tıklayın."
+  LangString MsgARM64Notice ${LANG_SIMPCHINESE} "我们的下载页面提供 SABnzbd 的 ARM 版本。此安装程序仅包含常规版本。$\n按“确定”继续，或按“取消”退出。"
 
-  LangString MsgNoWin7      ${LANG_ENGLISH} "The installer only supports Windows 8.1 and above, use the standalone legacy version to run on older Windows version."
+  LangString MsgShutting    ${LANG_ENGLISH} "Shutting down SABnzbd"
+  LangString MsgShutting    ${LANG_CZECH} "Vypínání SABnzbd"
+  LangString MsgShutting    ${LANG_DANISH} "Lukker SABnzbd"
+  LangString MsgShutting    ${LANG_GERMAN} "Beende SABnzbd"
+  LangString MsgShutting    ${LANG_SPANISH} "Apagando SABnzbd"
+  LangString MsgShutting    ${LANG_FINNISH} "Sammutetaan SABnzbd"
+  LangString MsgShutting    ${LANG_FRENCH} "Arrêt de SABnzbd"
+  LangString MsgShutting    ${LANG_HEBREW} "מכבה את SABnzbd"
+  LangString MsgShutting    ${LANG_ITALIAN} "Arresto di SABnzbd in corso"
+  LangString MsgShutting    ${LANG_NORWEGIAN} "Slår av SABnzbd"
+  LangString MsgShutting    ${LANG_DUTCH} "SABnzbd wordt afgesloten"
+  LangString MsgShutting    ${LANG_POLISH} "Zamykanie SABnzbd"
+  LangString MsgShutting    ${LANG_PORTUGUESEBR} "Encerrando o SABnzbd"
+  LangString MsgShutting    ${LANG_ROMANIAN} "Se oprește SABnzbd"
+  LangString MsgShutting    ${LANG_RUSSIAN} "Завершение работы SABnzbd"
+  LangString MsgShutting    ${LANG_SERBIAN} "Искључивање SABnzbd"
+  LangString MsgShutting    ${LANG_SWEDISH} "Stänger av SABnzbd."
+  LangString MsgShutting    ${LANG_TURKISH} "SABnzbd kapatılıyor"
+  LangString MsgShutting    ${LANG_SIMPCHINESE} "正在关闭 SABnzbd"
 
   LangString MsgUninstall   ${LANG_ENGLISH} "This will uninstall SABnzbd from your system"
+  LangString MsgUninstall   ${LANG_CZECH} "Tímto odinstalujete SABnzbd z vašeho systému"
+  LangString MsgUninstall   ${LANG_DANISH} "Dette vil afinstallere SABnzbd fra dit system"
+  LangString MsgUninstall   ${LANG_GERMAN} "Dies entfernt SABnzbd von Ihrem System"
+  LangString MsgUninstall   ${LANG_SPANISH} "Esto desinstalará SABnzbd de su sistema"
+  LangString MsgUninstall   ${LANG_FINNISH} "Tämä poistaa SABnzbd:n tietokoneestasi"
+  LangString MsgUninstall   ${LANG_FRENCH} "Ceci désinstallera SABnzbd de votre système"
+  LangString MsgUninstall   ${LANG_HEBREW} "זה יסיר את SABnzbd מהמערכת שלך"
+  LangString MsgUninstall   ${LANG_ITALIAN} "Questo disinstallerà SABnzbd dal tuo sistema"
+  LangString MsgUninstall   ${LANG_NORWEGIAN} "Dette vil avinstallere SABnzbd fra ditt system"
+  LangString MsgUninstall   ${LANG_DUTCH} "Dit verwijdert SABnzbd van je systeem"
+  LangString MsgUninstall   ${LANG_POLISH} "To odinstaluje SABnzbd z systemu"
+  LangString MsgUninstall   ${LANG_PORTUGUESEBR} "Isso irá desinstalar SABnzbd de seu sistema"
+  LangString MsgUninstall   ${LANG_ROMANIAN} "Acest lucru va dezinstala SABnzbd din sistem"
+  LangString MsgUninstall   ${LANG_RUSSIAN} "Приложение SABnzbd будет удалено из вашей системы"
+  LangString MsgUninstall   ${LANG_SERBIAN} "Ово ће уклонити САБнзбд са вашег система"
+  LangString MsgUninstall   ${LANG_SWEDISH} "Detta kommer att avinstallera SABnzbd från systemet"
+  LangString MsgUninstall   ${LANG_TURKISH} "Bu, SABnzbd'yi sisteminizden kaldıracaktır"
+  LangString MsgUninstall   ${LANG_SIMPCHINESE} "这将从您的系统中卸载 SABnzbd"
 
   LangString MsgRunAtStart  ${LANG_ENGLISH} "Run at startup"
+  LangString MsgRunAtStart  ${LANG_CZECH} "Spouštět při startu systému"
+  LangString MsgRunAtStart  ${LANG_DANISH} "Kør ved opstart"
+  LangString MsgRunAtStart  ${LANG_GERMAN} "Beim Systemstart ausführen"
+  LangString MsgRunAtStart  ${LANG_SPANISH} "Ejecutar al inicio"
+  LangString MsgRunAtStart  ${LANG_FINNISH} "Suorita käynnistyksen yhteydessä"
+  LangString MsgRunAtStart  ${LANG_FRENCH} "Lancer au démarrage"
+  LangString MsgRunAtStart  ${LANG_HEBREW} "הרץ בהזנק"
+  LangString MsgRunAtStart  ${LANG_ITALIAN} "Esegui all'avvio"
+  LangString MsgRunAtStart  ${LANG_NORWEGIAN} "Kjør ved oppstart"
+  LangString MsgRunAtStart  ${LANG_DUTCH} "Starten met Windows"
+  LangString MsgRunAtStart  ${LANG_POLISH} "Uruchom wraz z systemem"
+  LangString MsgRunAtStart  ${LANG_PORTUGUESEBR} "Executar na inicialização"
+  LangString MsgRunAtStart  ${LANG_ROMANIAN} "Executare la pornire"
+  LangString MsgRunAtStart  ${LANG_RUSSIAN} "Запускать вместе с системой"
+  LangString MsgRunAtStart  ${LANG_SERBIAN} "Покрени са системом"
+  LangString MsgRunAtStart  ${LANG_SWEDISH} "Kör vid uppstart"
+  LangString MsgRunAtStart  ${LANG_TURKISH} "Başlangıçta Çalıştır"
+  LangString MsgRunAtStart  ${LANG_SIMPCHINESE} "启动时运行"
 
   LangString MsgIcon        ${LANG_ENGLISH} "Desktop Icon"
+  LangString MsgIcon        ${LANG_CZECH} "Ikona na ploše"
+  LangString MsgIcon        ${LANG_DANISH} "Skrivebordsikon"
+  LangString MsgIcon        ${LANG_GERMAN} "Desktop-Symbol"
+  LangString MsgIcon        ${LANG_SPANISH} "Icono del escritorio"
+  LangString MsgIcon        ${LANG_FINNISH} "Työpöydän kuvake"
+  LangString MsgIcon        ${LANG_FRENCH} "Icône sur le Bureau"
+  LangString MsgIcon        ${LANG_HEBREW} "צור קיצור דרך בשולחן העבודה"
+  LangString MsgIcon        ${LANG_ITALIAN} "Icona sul desktop"
+  LangString MsgIcon        ${LANG_NORWEGIAN} "Skrivebordsikon"
+  LangString MsgIcon        ${LANG_DUTCH} "Bureaubladpictogram"
+  LangString MsgIcon        ${LANG_POLISH} "Ikona pulpitu"
+  LangString MsgIcon        ${LANG_PORTUGUESEBR} "Ícone na Área de Trabalho"
+  LangString MsgIcon        ${LANG_ROMANIAN} "Icoană Desktop"
+  LangString MsgIcon        ${LANG_RUSSIAN} "Значок на рабочем столе"
+  LangString MsgIcon        ${LANG_SERBIAN} "Иконица радне површи"
+  LangString MsgIcon        ${LANG_SWEDISH} "Skrivbordsikon"
+  LangString MsgIcon        ${LANG_TURKISH} "Masaüstü İkonu"
+  LangString MsgIcon        ${LANG_SIMPCHINESE} "桌面图标"
 
   LangString MsgAssoc       ${LANG_ENGLISH} "NZB File association"
+  LangString MsgAssoc       ${LANG_CZECH} "Přiřazení souborů NZB"
+  LangString MsgAssoc       ${LANG_DANISH} "NZB-filtilknytning"
+  LangString MsgAssoc       ${LANG_GERMAN} "Mit NZB-Dateien verknüpfen"
+  LangString MsgAssoc       ${LANG_SPANISH} "Asociación de archivos NZB"
+  LangString MsgAssoc       ${LANG_FINNISH} "NZB tiedostosidos"
+  LangString MsgAssoc       ${LANG_FRENCH} "Association des fichiers NZB"
+  LangString MsgAssoc       ${LANG_HEBREW} "NZB שייך קבצי"
+  LangString MsgAssoc       ${LANG_ITALIAN} "Associazione file NZB"
+  LangString MsgAssoc       ${LANG_NORWEGIAN} "NZB-filassosiering"
+  LangString MsgAssoc       ${LANG_DUTCH} "NZB-bestanden openen met SABnzbd"
+  LangString MsgAssoc       ${LANG_POLISH} "powiązanie pliku NZB"
+  LangString MsgAssoc       ${LANG_PORTUGUESEBR} "Associação com Arquivos NZB"
+  LangString MsgAssoc       ${LANG_ROMANIAN} "Asociere cu Fişierele NZB"
+  LangString MsgAssoc       ${LANG_RUSSIAN} "Ассоциировать с файлами NZB"
+  LangString MsgAssoc       ${LANG_SERBIAN} "Придруживање НЗБ датотеке"
+  LangString MsgAssoc       ${LANG_SWEDISH} "NZB Filassosication"
+  LangString MsgAssoc       ${LANG_TURKISH} "NZB Dosya ilişkilendirmesi"
+  LangString MsgAssoc       ${LANG_SIMPCHINESE} "NZB 文件关联"
 
   LangString MsgDelProgram  ${LANG_ENGLISH} "Delete Program"
+  LangString MsgDelProgram  ${LANG_CZECH} "Odstranit program"
+  LangString MsgDelProgram  ${LANG_DANISH} "Slet program"
+  LangString MsgDelProgram  ${LANG_GERMAN} "Programm löschen"
+  LangString MsgDelProgram  ${LANG_SPANISH} "Eliminar programa"
+  LangString MsgDelProgram  ${LANG_FINNISH} "Poista sovellus"
+  LangString MsgDelProgram  ${LANG_FRENCH} "Supprimer le programme"
+  LangString MsgDelProgram  ${LANG_HEBREW} "מחק תוכנית"
+  LangString MsgDelProgram  ${LANG_ITALIAN} "Elimina programma"
+  LangString MsgDelProgram  ${LANG_NORWEGIAN} "Fjern program"
+  LangString MsgDelProgram  ${LANG_DUTCH} "Programma verwijderen"
+  LangString MsgDelProgram  ${LANG_POLISH} "Usuń program"
+  LangString MsgDelProgram  ${LANG_PORTUGUESEBR} "Excluir o Programa"
+  LangString MsgDelProgram  ${LANG_ROMANIAN} "Şterge Program"
+  LangString MsgDelProgram  ${LANG_RUSSIAN} "Удалить программу"
+  LangString MsgDelProgram  ${LANG_SERBIAN} "Обриши програм"
+  LangString MsgDelProgram  ${LANG_SWEDISH} "Radera programmet"
+  LangString MsgDelProgram  ${LANG_TURKISH} "Programı Sil"
+  LangString MsgDelProgram  ${LANG_SIMPCHINESE} "删除程序"
 
   LangString MsgDelSettings ${LANG_ENGLISH} "Delete Settings"
-
-  LangString MsgRemoveOld   ${LANG_ENGLISH} "You cannot overwrite an existing installation. $\n$\nClick `OK` to remove the previous version or `Cancel` to cancel this upgrade."
-
-  LangString MsgRemoveOld2  ${LANG_ENGLISH} "Your settings and data will be preserved."
+  LangString MsgDelSettings ${LANG_CZECH} "Smazat nastavení"
+  LangString MsgDelSettings ${LANG_DANISH} "Slet indstillinger"
+  LangString MsgDelSettings ${LANG_GERMAN} "Einstellungen löschen"
+  LangString MsgDelSettings ${LANG_SPANISH} "Eliminar Ajustes"
+  LangString MsgDelSettings ${LANG_FINNISH} "Poista asetukset"
+  LangString MsgDelSettings ${LANG_FRENCH} "Supprimer les paramètres"
+  LangString MsgDelSettings ${LANG_HEBREW} "מחק הגדרות"
+  LangString MsgDelSettings ${LANG_ITALIAN} "Elimina impostazioni"
+  LangString MsgDelSettings ${LANG_NORWEGIAN} "Slett innstillinger"
+  LangString MsgDelSettings ${LANG_DUTCH} "Verwijder alle instellingen"
+  LangString MsgDelSettings ${LANG_POLISH} "Skasuj obecne ustawienia"
+  LangString MsgDelSettings ${LANG_PORTUGUESEBR} "Apagar Configurações"
+  LangString MsgDelSettings ${LANG_ROMANIAN} "Ştergeţi Setări"
+  LangString MsgDelSettings ${LANG_RUSSIAN} "Удалить параметры"
+  LangString MsgDelSettings ${LANG_SERBIAN} "Обриши подешавања"
+  LangString MsgDelSettings ${LANG_SWEDISH} "Radera inställningar"
+  LangString MsgDelSettings ${LANG_TURKISH} "Ayarları Sil"
+  LangString MsgDelSettings ${LANG_SIMPCHINESE} "删除设置"
 
   LangString MsgLangCode    ${LANG_ENGLISH} "en"
+  LangString MsgLangCode    ${LANG_CZECH} "cs"
+  LangString MsgLangCode    ${LANG_DANISH} "da"
+  LangString MsgLangCode    ${LANG_GERMAN} "de"
+  LangString MsgLangCode    ${LANG_SPANISH} "es"
+  LangString MsgLangCode    ${LANG_FINNISH} "fi"
+  LangString MsgLangCode    ${LANG_FRENCH} "fr"
+  LangString MsgLangCode    ${LANG_HEBREW} "he"
+  LangString MsgLangCode    ${LANG_ITALIAN} "it"
+  LangString MsgLangCode    ${LANG_NORWEGIAN} "nb"
+  LangString MsgLangCode    ${LANG_DUTCH} "nl"
+  LangString MsgLangCode    ${LANG_POLISH} "pl"
+  LangString MsgLangCode    ${LANG_PORTUGUESEBR} "pt_BR"
+  LangString MsgLangCode    ${LANG_ROMANIAN} "ro"
+  LangString MsgLangCode    ${LANG_RUSSIAN} "ru"
+  LangString MsgLangCode    ${LANG_SERBIAN} "sr"
+  LangString MsgLangCode    ${LANG_SWEDISH} "sv"
+  LangString MsgLangCode    ${LANG_TURKISH} "tr"
+  LangString MsgLangCode    ${LANG_SIMPCHINESE} "zh_CN"
 
 Function un.onInit
   !insertmacro MUI_UNGETLANGUAGE

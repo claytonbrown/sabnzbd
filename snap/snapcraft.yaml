@@ -1,32 +1,144 @@
 name: sabnzbd
-summary: SABnzbd
+title: SABnzbd
+summary: SABnzbd - The automated Usenet download tool
 description: The automated Usenet download tool
+license: GPL-2.0-or-later
+website: https://sabnzbd.org
+contact: https://github.com/sabnzbd/sabnzbd/issues
+issues: https://github.com/sabnzbd/sabnzbd/issues
+source-code: https://github.com/sabnzbd/sabnzbd.git
+donation: https://sabnzbd.org/donate/
 confinement: strict
-base: core20
+base: core26
 grade: stable
 icon: interfaces/Config/templates/staticcfg/images/logo-small.svg
 adopt-info: sabnzbd
+
+platforms:
+  amd64:
+  arm64:
 
 apps:
   sabnzbd:
     environment:
       LC_CTYPE: C.UTF-8
-    command: python3 $SNAP/opt/sabnzbd/SABnzbd.py -f $SNAP_COMMON
+    command: bin/python3 $SNAP/opt/sabnzbd/SABnzbd.py -f $SNAP_COMMON
     daemon: simple
-    plugs: [network, home, network-bind, removable-media]
+    stop-mode: sigterm-all
+    stop-timeout: 20s
+    restart-condition: on-failure
+    restart-delay: 20s
+    plugs:
+      - network
+      - home
+      - network-bind
+      - removable-media
+      # For bonjour/zeroconf support (avahi-observe is insufficient for making announcements)
+      - avahi-control
+      # For calling "df" at startup, from sabnzbd.utils.checkdir.isFAT()
+      - mount-observe
 
 parts:
+  python-runtime:
+    # Adapted from https://ubuntu.com/docs/snapcraft/9/how-to/change-bases/change-from-core24-to-core26/#repackage-python
+    plugin: nil
+    stage-packages:
+      - libpython3-stdlib
+      - python3-minimal
+      - python3-venv
+
   sabnzbd:
+    after:
+      - python-runtime
     plugin: python
     source: .
-    requirements: [snap/local/requirements_snap.txt, requirements.txt]
-    stage-packages: [python3-dev, libdb5.3, unrar, p7zip-full, par2]
-    build-packages: [libffi-dev, python3-dev, libssl-dev, cargo]
+    python-requirements:
+      - requirements.txt
+    stage-packages:
+      # Bonjour/Zeroconf support
+      - libavahi-compat-libdnssd1
+      - libavahi-client3
+      - libavahi-common3
+    build-packages:
+      - git
+      - pkg-config
+      - libffi-dev
+      - python3-dev
+      - libssl-dev
+      - cargo
+      - rsync
+    override-pull: |
+      craftctl default
+      craftctl set version=$(grep -o -P '(?<=__version__ = ").*(?=")' sabnzbd/version.py)
+      if [ -z "$(git status --porcelain)" ]; then
+        COMMIT=$(git rev-parse --short HEAD)
+        sed -i "s/__baseline__ = .*/__baseline__ = \"${COMMIT}\"/" sabnzbd/version.py
+      fi
     override-build: |
-      snapcraftctl set-version $(grep -oP '(?<=^Version: ).*' PKG-INFO)
-      snapcraftctl build
+      # SABnzbd is an application source tree, not a pip-installable package.
+      # The Python plugin runs `pip install -U .` when pyproject.toml exists,
+      # so hide it during `craftctl default` and restore it immediately after.
+      mv pyproject.toml pyproject.toml.snapcraft-backup
+      craftctl default
+      mv pyproject.toml.snapcraft-backup pyproject.toml
       python3 tools/make_mo.py
-      mkdir -p $SNAPCRAFT_PART_INSTALL/opt
-      cp -R $SNAPCRAFT_PART_BUILD $SNAPCRAFT_PART_INSTALL/opt/sabnzbd
-    organize:
-      usr/bin/unrar-nonfree: usr/bin/unrar
+      rsync -av --mkpath \
+        --exclude=.git \
+        --exclude=.github \
+        --exclude=builder \
+        --exclude=macos \
+        --exclude=po \
+        --exclude=snap \
+        --exclude=tests \
+        --exclude=win \
+        $CRAFT_PART_BUILD/ $CRAFT_PART_INSTALL/opt/sabnzbd/
+
+  7zip:
+    source: .
+    plugin: nil
+    build-packages:
+      - jq
+      - curl
+    build-environment:
+      - LDFLAGS: -s
+    override-pull: |
+      SEVENZIP_TARBALL_PATH="$CRAFT_PROJECT_DIR/snap/7zip.tar.gz"
+      if [ ! -f "$SEVENZIP_TARBALL_PATH" ]; then
+        SEVENZIP_TARBALL="$(curl -sL https://api.github.com/repos/ip7z/7zip/releases/latest | jq -r '.tarball_url')"
+        curl -o "$SEVENZIP_TARBALL_PATH" -L "$SEVENZIP_TARBALL"
+      else
+        echo "Using cached snap/7zip.tar.gz"
+      fi
+      tar xf "$SEVENZIP_TARBALL_PATH" --strip-components=1
+    override-build: |
+      craftctl default
+      cd CPP/7zip/Bundles/Alone2
+      make -f makefile.gcc
+      install -D -m755 ./_o/7zz -t "$CRAFT_PART_INSTALL/usr/bin"
+
+  unrar:
+    source: .
+    plugin: nil
+    build-packages:
+      - curl
+    build-environment:
+      - LDFLAGS: -s
+    override-pull: |
+      UNRAR_TARBALL_PATH="$CRAFT_PROJECT_DIR/snap/unrar.tar.gz"
+      if [ ! -f "$UNRAR_TARBALL_PATH" ]; then
+        UNRAR_TARBALL_LINK="$(curl -sL https://www.rarlab.com/rar_add.htm | sed -z -n -e s%'.*<a href="\(rar/unrarsrc-[.0-9]\+.tar.gz\)">UnRAR\ source</a>.*%\1%p')"
+        if [ ! -z "$UNRAR_TARBALL_LINK" ]; then
+          UNRAR_TARBALL="https://www.rarlab.com/$UNRAR_TARBALL_LINK"
+        else
+          echo "failed to extract unrar tarball link"
+          exit 42
+        fi
+        curl -o "$UNRAR_TARBALL_PATH" -L "$UNRAR_TARBALL"
+      else
+        echo "Using cached snap/unrar.tar.gz"
+      fi
+      tar xf "$UNRAR_TARBALL_PATH" --strip-components=1
+    override-build: |
+      craftctl default
+      make all
+      install -D -m755 ./unrar -t "$CRAFT_PART_INSTALL/usr/bin"

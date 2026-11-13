@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -OO
-# Copyright 2007-2021 The SABnzbd-Team <team@sabnzbd.org>
+# Copyright 2007-2026 by The SABnzbd-Team (sabnzbd.org)
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -18,24 +18,53 @@
 """
 tests.test_filesystem - Testing functions in filesystem.py
 """
+
+import datetime
+import errno
+import io
+import pickle
 import stat
 import sys
 import os
-import random
 import shutil
+import time
+import unicodedata
 from pathlib import Path
+import tempfile
+from random import choice, randint
+from unittest import mock
 
-import pyfakefs.fake_filesystem_unittest as ffs
+import pytest
+from pyfakefs.helpers import set_uid
 
+from tests.testhelper import SAB_DATA_DIR
+
+import sabnzbd
 import sabnzbd.cfg
+from sabnzbd import cfg
 import sabnzbd.filesystem as filesystem
-from sabnzbd.constants import DEF_FOLDER_MAX, DEF_FILE_MAX
-from tests.testhelper import *
+from sabnzbd.constants import DEF_FOLDER_MAX, DEF_FILE_MAX, JOB_ADMIN, DEF_DOWNLOAD_DIR, DEF_COMPLETE_DIR
 
 # Set the global uid for fake filesystems to a non-root user;
 # by default this depends on the user running pytest.
 global_uid = 1000
-ffs.set_uid(global_uid)
+set_uid(global_uid)
+
+
+def _symlinks_available() -> bool:
+    """On Windows, creating a symlink needs an elevated shell or Developer Mode.
+    Probe it once, so tests that need real symlinks skip instead of erroring."""
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            os.symlink(tmp, os.path.join(tmp, "link"), target_is_directory=True)
+            return True
+        except (OSError, NotImplementedError, AttributeError):
+            return False
+
+
+needs_symlinks = pytest.mark.skipif(
+    not _symlinks_available(), reason="Creating symlinks requires elevation or Developer Mode"
+)
 
 
 class TestFileFolderNameSanitizer:
@@ -43,34 +72,34 @@ class TestFileFolderNameSanitizer:
         assert filesystem.sanitize_filename(None) is None
         assert filesystem.sanitize_foldername(None) is None
 
-    @set_platform("win32")
+    @pytest.mark.platform("win32")
     def test_colon_handling_windows(self):
-        assert filesystem.sanitize_filename("test:aftertest") == "test-aftertest"
-        assert filesystem.sanitize_filename(":") == "-"
-        assert filesystem.sanitize_filename("test:") == "test-"
-        assert filesystem.sanitize_filename("test: ") == "test-"
+        assert filesystem.sanitize_filename("test:aftertest") == "test_aftertest"
+        assert filesystem.sanitize_filename(":") == "_"
+        assert filesystem.sanitize_filename("test:") == "test_"
+        assert filesystem.sanitize_filename("test: ") == "test_"
         # They should act the same
         assert filesystem.sanitize_filename("test:aftertest") == filesystem.sanitize_foldername("test:aftertest")
 
-    @set_platform("darwin")
-    def test_colon_handling_darwin(self):
-        assert filesystem.sanitize_filename("test:aftertest") == "aftertest"
-        assert filesystem.sanitize_filename(":aftertest") == "aftertest"
-        assert filesystem.sanitize_filename("::aftertest") == "aftertest"
-        assert filesystem.sanitize_filename(":after:test") == "test"
-        # Empty after sanitising with darwin colon handling
-        assert filesystem.sanitize_filename(":") == "unknown"
-        assert filesystem.sanitize_filename("test:") == "unknown"
-        assert filesystem.sanitize_filename("test: ") == "unknown"
+    @pytest.mark.platform("macos")
+    def test_colon_handling_macos(self):
+        assert filesystem.sanitize_filename("test:aftertest") == "test_aftertest"
+        assert filesystem.sanitize_filename(":aftertest") == "_aftertest"
+        assert filesystem.sanitize_filename("::aftertest") == "__aftertest"
+        assert filesystem.sanitize_filename(":after:test") == "_after_test"
+        # Empty after sanitising with macos colon handling
+        assert filesystem.sanitize_filename(":") == "_"
+        assert filesystem.sanitize_filename("test:") == "test_"
+        assert filesystem.sanitize_filename("test: ") == "test_"
 
-    @set_platform("linux")
+    @pytest.mark.platform("linux")
     def test_colon_handling_other(self):
         assert filesystem.sanitize_filename("test:aftertest") == "test:aftertest"
         assert filesystem.sanitize_filename(":") == ":"
         assert filesystem.sanitize_filename("test:") == "test:"
         assert filesystem.sanitize_filename("test: ") == "test:"
 
-    @set_platform("win32")
+    @pytest.mark.platform("win32")
     def test_win_devices_on_win(self):
         assert filesystem.sanitize_filename(None) is None
         assert filesystem.sanitize_filename("aux.txt") == "_aux.txt"
@@ -78,37 +107,132 @@ class TestFileFolderNameSanitizer:
         assert filesystem.sanitize_filename("$mft") == "Smft"
         assert filesystem.sanitize_filename("a$mft") == "a$mft"
 
-    @set_platform("linux")
+    @pytest.mark.platform("linux")
     def test_win_devices_not_win(self):
-        # Linux and Darwin are the same for this
+        # Linux and macOS are the same for this
         assert filesystem.sanitize_filename(None) is None
         assert filesystem.sanitize_filename("aux.txt") == "aux.txt"
         assert filesystem.sanitize_filename("txt.aux") == "txt.aux"
         assert filesystem.sanitize_filename("$mft") == "$mft"
         assert filesystem.sanitize_filename("a$mft") == "a$mft"
 
-    @set_platform("linux")
-    def test_file_illegal_chars_linux(self):
-        assert filesystem.sanitize_filename("test/aftertest") == "test+aftertest"
-        assert filesystem.sanitize_filename("/test") == "+test"
-        assert filesystem.sanitize_filename("test/") == "test+"
-        assert filesystem.sanitize_filename(r"/test\/aftertest/") == r"+test\+aftertest+"
-        assert filesystem.sanitize_filename("/") == "+"
-        assert filesystem.sanitize_filename("///") == "+++"
-        assert filesystem.sanitize_filename("../") == "..+"
-        assert filesystem.sanitize_filename("../test") == "..+test"
+    @pytest.mark.platform("win32")
+    def test_file_illegal_chars_win32(self):
+        assert filesystem.sanitize_filename("test" + filesystem.CH_ILLEGAL_WIN + "aftertest") == (
+            "test" + (len(filesystem.CH_ILLEGAL_WIN) * "_") + "aftertest"
+        )
+        assert (
+            filesystem.sanitize_filename("test" + chr(0) + chr(1) + chr(15) + chr(31) + "aftertest")
+            == "test____aftertest"
+        )
 
-    @set_platform("linux")
+    @pytest.mark.platform("win32")
+    def test_folder_illegal_chars_win32(self):
+        assert (
+            filesystem.sanitize_foldername("test" + chr(0) + chr(9) + chr(13) + chr(31) + "aftertest")
+            == "test____aftertest"
+        )
+
+    @pytest.mark.platform("linux")
+    def test_file_illegal_chars_linux(self):
+        assert filesystem.sanitize_filename("test/aftertest") == "test_aftertest"
+        assert filesystem.sanitize_filename("/test") == "_test"
+        assert filesystem.sanitize_filename("test/") == "test_"
+        assert filesystem.sanitize_filename(r"/test\/aftertest/") == r"_test\_aftertest_"
+        assert filesystem.sanitize_filename("/") == "_"
+        assert filesystem.sanitize_filename("///") == "___"
+        assert filesystem.sanitize_filename("../") == ".._"
+        assert filesystem.sanitize_filename("../test") == ".._test"
+
+    @pytest.mark.parametrize("platform", ["win32", "macos", "linux"])
+    @pytest.mark.platform()
+    def test_file_allow_subdirs(self, platform):
+        """Par2 uses "/" to separate sub-directories, no matter which platform created the set"""
+        assert filesystem.sanitize_filename("sub/test.rar", allow_subdirs=True) == os.path.join("sub", "test.rar")
+        assert filesystem.sanitize_filename("sub/deeper/test.rar", allow_subdirs=True) == os.path.join(
+            "sub", "deeper", "test.rar"
+        )
+        # No sub-directory at all, or nothing but separators
+        assert filesystem.sanitize_filename("test.rar", allow_subdirs=True) == "test.rar"
+        assert filesystem.sanitize_filename("a//b.rar", allow_subdirs=True) == os.path.join("a", "b.rar")
+        assert filesystem.sanitize_filename("sub/./test.rar", allow_subdirs=True) == os.path.join("sub", "test.rar")
+        # Every part is sanitized on its own, chr(0) is illegal on all platforms
+        assert filesystem.sanitize_filename("sub" + chr(0) + "1/test" + chr(0) + "2.rar", allow_subdirs=True) == (
+            os.path.join("sub_1", "test_2.rar")
+        )
+
+    @pytest.mark.parametrize(
+        "hostile_name",
+        [
+            "/test.rar",
+            "//test.rar",
+            "../test.rar",
+            "../../../../../../etc/shadow",
+            "sub/../../test.rar",
+            "sub/../../../sub/test.rar",
+            "./../test.rar",
+            "../..",
+            "../",
+            "/",
+            "//",
+            "/../",
+            "...",
+            "....",
+            # Whitespace must not hide a part from the checks, it is stripped while sanitizing
+            " .. /test.rar",
+            " .. / .. /etc/shadow",
+            "sub/ .. / .. /test.rar",
+            "\t..\t/test.rar",
+            "\xa0../test.rar",
+            " .. ",
+        ],
+    )
+    @pytest.mark.parametrize("platform", ["win32", "macos", "linux"])
+    @pytest.mark.platform()
+    def test_file_allow_subdirs_cannot_escape(self, platform, hostile_name):
+        """Whatever the par2 claims, the result has to stay inside the folder it is used in.
+        Joining it onto any base directory must never point above that base."""
+        result = filesystem.sanitize_filename(hostile_name, allow_subdirs=True)
+
+        assert result, "an empty result would resolve to the base directory itself"
+        assert not os.path.isabs(result)
+        assert os.pardir not in result.split(os.sep)
+
+        # The real test: it cannot climb out of whatever it gets joined to
+        base = os.path.join(os.sep + "downloads", "incomplete", "job")
+        resolved = os.path.normpath(os.path.join(base, result))
+        assert resolved.startswith(base + os.sep), "%s escaped to %s" % (hostile_name, resolved)
+
+    @pytest.mark.parametrize(
+        "hostile_name",
+        [
+            JOB_ADMIN,
+            JOB_ADMIN + "/__verified__",
+            JOB_ADMIN.lower() + "/__verified__",
+            "sub/" + JOB_ADMIN + "/__verified__",
+            JOB_ADMIN + "/deeper/__verified__",
+            # Whitespace must not hide a part from the checks, it is stripped while sanitizing
+            " " + JOB_ADMIN + " /__verified__",
+            "\t" + JOB_ADMIN + "\t/__verified__",
+            "sub/ " + JOB_ADMIN.lower() + " /__verified__",
+        ],
+    )
+    @pytest.mark.parametrize("platform", ["win32", "macos", "linux"])
+    @pytest.mark.platform()
+    def test_file_allow_subdirs_cannot_enter_admin(self, platform, hostile_name):
+        """The admin folder is pickle-loaded, so a par2 name must never point into it"""
+        result = filesystem.sanitize_filename(hostile_name, allow_subdirs=True)
+
+        assert result, "an empty result would resolve to the base directory itself"
+        assert JOB_ADMIN.lower() not in result.lower().split(os.sep)
+
+    @pytest.mark.platform("linux")
     def test_folder_illegal_chars_linux(self):
-        assert filesystem.sanitize_foldername('test"aftertest') == "test'aftertest"
-        assert filesystem.sanitize_foldername("test:") == "test-"
+        assert filesystem.sanitize_foldername('test"aftertest') == "test_aftertest"
+        assert filesystem.sanitize_foldername("test:") == "test_"
         assert filesystem.sanitize_foldername("test<>?*|aftertest") == "test<>?*|aftertest"
 
-    def test_char_collections(self):
-        assert len(filesystem.CH_ILLEGAL) == len(filesystem.CH_LEGAL)
-        assert len(filesystem.CH_ILLEGAL_WIN) == len(filesystem.CH_LEGAL_WIN)
-
-    @set_platform("linux")
+    @pytest.mark.platform("linux")
     def test_legal_chars_linux(self):
         # Illegal on Windows but not on Linux, unless sanitize_safe is active.
         # Don't bother with '/' which is illegal in filenames on all platforms.
@@ -120,25 +244,58 @@ class TestFileFolderNameSanitizer:
             assert filesystem.sanitize_filename("test" + char * 2) == ("test" + char * 2).strip()
             assert filesystem.sanitize_filename(char * 2 + "test") == (char * 2 + "test").strip()
 
-    @set_platform("linux")
-    @set_config({"sanitize_safe": True})
+    @pytest.mark.platform("linux")
+    @pytest.mark.config({"sanitize_safe": True})
     def test_sanitize_safe_linux(self):
         # Set sanitize_safe to on, simulating Windows-style restrictions.
         assert filesystem.sanitize_filename("test" + filesystem.CH_ILLEGAL_WIN + "aftertest") == (
-            "test" + filesystem.CH_LEGAL_WIN + "aftertest"
+            "test" + (len(filesystem.CH_ILLEGAL_WIN) * "_") + "aftertest"
         )
         for index in range(0, len(filesystem.CH_ILLEGAL_WIN)):
-            char_leg = filesystem.CH_LEGAL_WIN[index]
             char_ill = filesystem.CH_ILLEGAL_WIN[index]
-            assert filesystem.sanitize_filename("test" + char_ill * 2 + "aftertest") == (
-                "test" + char_leg * 2 + "aftertest"
-            )
+            assert filesystem.sanitize_filename("test" + char_ill * 2 + "aftertest") == ("test__aftertest")
             # Illegal chars that also get caught by strip() never make it far
             # enough to be replaced by their legal equivalents if they appear
             # on either end of the filename.
             if char_ill.strip():
-                assert filesystem.sanitize_filename("test" + char_ill * 2) == ("test" + char_leg * 2)
-                assert filesystem.sanitize_filename(char_ill * 2 + "test") == (char_leg * 2 + "test")
+                assert filesystem.sanitize_filename("test" + char_ill * 2) == "test__"
+                assert filesystem.sanitize_filename(char_ill * 2 + "test") == "__test"
+
+    def test_nfc_normalization_filename(self):
+        """sanitize_filename must normalize Unicode to NFC (fixes issues #1633 and #2858).
+
+        macOS decomposes Unicode to NFD when returning filenames from the filesystem.
+        par2 files, yEnc headers, and NZBs typically carry NFC. Without normalization,
+        visually identical filenames compare unequal, causing double-unpacking and
+        inconsistent sort paths when %fn (disk) and %title (parsed) are combined.
+        """
+        # NFD: 'e' + U+0300 (combining grave), 'o' + U+0308 (combining diaeresis)
+        nfd_name = "fre\u0300nch_german_demo\u0308.mkv"
+        # NFC: precomposed è (U+00E8) and ö (U+00F6)
+        nfc_name = "frènch_german_demö.mkv"
+
+        assert nfd_name != nfc_name, "pre-condition: NFD and NFC byte representations differ"
+        result = filesystem.sanitize_filename(nfd_name)
+        assert result == nfc_name
+        assert unicodedata.is_normalized("NFC", result)
+
+        # NFC input must pass through unchanged (idempotent)
+        assert filesystem.sanitize_filename(nfc_name) == nfc_name
+
+    def test_nfc_normalization_foldername(self):
+        """sanitize_foldername must normalize Unicode to NFC (fixes issues #1633 and #2858)."""
+        nfd_folder = "Mo\u0308vie"  # NFD: 'o' + U+0308 (combining diaeresis)
+        nfc_folder = "Möwie"  # NFC: precomposed ö (U+00F6)
+        # Correct expected NFC for "Mo" + combining-diaeresis + "vie"
+        nfc_folder = "M\u00f6vie"
+
+        assert nfd_folder != nfc_folder, "pre-condition: NFD and NFC differ"
+        result = filesystem.sanitize_foldername(nfd_folder)
+        assert result == nfc_folder
+        assert unicodedata.is_normalized("NFC", result)
+
+        # NFC input must pass through unchanged (idempotent)
+        assert filesystem.sanitize_foldername(nfc_folder) == nfc_folder
 
     def test_filename_dot(self):
         # All dots should survive in filenames
@@ -162,14 +319,56 @@ class TestFileFolderNameSanitizer:
         assert filesystem.sanitize_foldername("test.aftertest.") == "test.aftertest"
         assert filesystem.sanitize_foldername("test.aftertest..") == "test.aftertest"
         assert filesystem.sanitize_foldername("test. aftertest. . . .") == "test. aftertest"
-        assert filesystem.sanitize_foldername("/test/this.") == "+test+this"
-        assert filesystem.sanitize_foldername("/test./this.") == "+test.+this"
-        assert filesystem.sanitize_foldername("/test. /this . ") == "+test. +this"
+        assert filesystem.sanitize_foldername("/test/this.") == "_test_this"
+        assert filesystem.sanitize_foldername("/test./this.") == "_test._this"
+        assert filesystem.sanitize_foldername("/test. /this . ") == "_test. _this"
 
     def test_long_foldername(self):
+        # Note: some filesystem can handle up to 255 UTF chars (which is more than 255 bytes) in the foldername,
+        # but we stay on the safe side: max DEF_FILE_MAX bytes
         assert len(filesystem.sanitize_foldername("test" * 100)) == DEF_FOLDER_MAX
         assert len(filesystem.sanitize_foldername("a" * DEF_FOLDER_MAX)) == DEF_FOLDER_MAX
         assert len(filesystem.sanitize_foldername("a" * (DEF_FOLDER_MAX + 1))) == DEF_FOLDER_MAX
+
+        # Adapted from filename tests
+
+        # PART 1: Base cases: Nothing should happen:
+        # normal filename
+        name = "a" * 200
+        sanitizedname = filesystem.sanitize_foldername(name)
+        assert sanitizedname == name
+
+        # Unicode / UTF8 is OK ... as total filename length is not too long
+        name = "BASE" + "你" * 50 + "blabla"
+        sanitizedname = filesystem.sanitize_foldername(name)
+        assert sanitizedname == name
+
+        # PART 2: base truncating
+        name = "BASE" + "a" * 300
+        sanitizedname = filesystem.sanitize_foldername(name)
+        assert len(sanitizedname) <= DEF_FOLDER_MAX
+        assert sanitizedname.startswith("BASEaaaaaaaaaaaaaaa")
+
+        # PART 3: more exotic cases
+
+        # insert NON-ASCII chars, which should stay in place because overall length is no problem
+        name = "aaaa" + 10 * chr(188) + 10 * chr(222) + "bbbb"
+        sanitizedname = filesystem.sanitize_foldername(name)
+        assert sanitizedname == name
+
+        # insert NON-ASCII chars
+        name = "aaaa" + 200 * chr(188) + 200 * chr(222)
+        sanitizedname = filesystem.sanitize_foldername(name)
+        assert (
+            sanitizedname
+            == "aaaa¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼"
+        )
+
+        # Unicode / UTF8 ... total filename length might be too long for certain filesystems
+        name = "BASE" + "你" * 200
+        sanitizedname = filesystem.sanitize_foldername(name)
+        assert sanitizedname.startswith("BASE")
+        assert sanitizedname.endswith("你")
 
     def test_filename_empty_result(self):
         # Nothing remains after sanitizing the filename
@@ -191,7 +390,6 @@ class TestFileFolderNameSanitizer:
         assert filesystem.sanitize_foldername(" . .") == "unknown"
 
     def test_filename_too_long(self):
-
         # Note: some filesystem can handle up to 255 UTF chars (which is more than 255 bytes) in the filename,
         # but we stay on the safe side: max DEF_FILE_MAX bytes
 
@@ -235,10 +433,13 @@ class TestFileFolderNameSanitizer:
         sanitizedname = filesystem.sanitize_filename(name)
         assert sanitizedname == name
 
-        # insert NON-ASCII chars, which should get removed because overall length is too long
+        # insert NON-ASCII chars
         name = "aaaa" + 200 * chr(188) + 200 * chr(222) + "bbbb.ext"
         sanitizedname = filesystem.sanitize_filename(name)
-        assert sanitizedname == "aaaabbbb.ext"
+        assert (
+            sanitizedname
+            == "aaaa¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼¼.ext"
+        )
 
         # Unicode / UTF8 ... total filename length might be too long for certain filesystems
         name = "BASE" + "你" * 200 + ".ext"
@@ -252,30 +453,31 @@ class TestFileFolderNameSanitizer:
         assert sanitizedname == name  # no change
 
 
-class TestSanitizeFiles(ffs.TestCase):
-    def setUp(self):
-        self.setUpPyfakefs()
-        self.fs.path_separator = "\\"
-        self.fs.is_windows_fs = True
-
+@pytest.mark.platform("win32")
+@pytest.mark.fake_fs(
+    {
+        # Disable randomisation of directory listings
+        "shuffle_listdir_results": False,
+    }
+)
+class TestSanitizeFiles:
     def test_sanitize_files_input(self):
         assert [] == filesystem.sanitize_files(folder=None)
         assert [] == filesystem.sanitize_files(filelist=None)
         assert [] == filesystem.sanitize_files(folder=None, filelist=None)
 
-    @set_platform("win32")
-    @set_config({"sanitize_safe": True})
-    def test_sanitize_files(self):
+    @pytest.mark.config({"sanitize_safe": True})
+    def test_sanitize_files(self, fake_fs):
         # The very specific tests of sanitize_filename() are above
         # Here we just want to see that sanitize_files() works as expected
         input_list = [r"c:\test\con.man", r"c:\test\foo:bar"]
-        output_list = [r"c:\test\_con.man", r"c:\test\foo-bar"]
+        output_list = [r"c:\test\_con.man", r"c:\test\foo_bar"]
 
         # Test both the "folder" and "filelist" based calls
         for kwargs in ({"folder": r"c:\test"}, {"filelist": input_list}):
             # Create source files
             for file in input_list:
-                self.fs.create_file(file)
+                fake_fs.create_file(file)
 
             assert output_list == filesystem.sanitize_files(**kwargs)
 
@@ -290,56 +492,386 @@ class TestSanitizeFiles(ffs.TestCase):
                 assert not os.path.exists(file)
 
 
-class TestSameFile:
+class TestSameDirectory:
     def test_nothing_in_common_win_paths(self):
-        assert 0 == filesystem.same_file("C:\\", "D:\\")
-        assert 0 == filesystem.same_file("C:\\", "/home/test")
+        assert 0 == filesystem.same_directory("C:\\", "D:\\")
+        if not sys.platform.startswith("win"):
+            # On Windows this resolves to the current drive, so it can be a sub-folder of C:\
+            assert 0 == filesystem.same_directory("C:\\", "/home/test")
 
     def test_nothing_in_common_unix_paths(self):
-        assert 0 == filesystem.same_file("/home/", "/data/test")
-        assert 0 == filesystem.same_file("/test/home/test", "/home/")
-        assert 0 == filesystem.same_file("/test/../home", "/test")
-        assert 0 == filesystem.same_file("/test/./test", "/test")
+        assert 0 == filesystem.same_directory("/home/", "/data/test")
+        assert 0 == filesystem.same_directory("/test/home/test", "/home/")
+        assert 0 == filesystem.same_directory("/test/../home", "/test")
+        assert 0 == filesystem.same_directory("/test/./test", "/test")
 
     @pytest.mark.skipif(sys.platform.startswith("win"), reason="Non-Windows tests")
-    @set_platform("linux")
+    @pytest.mark.platform("linux")
     def test_posix_fun(self):
-        assert 1 == filesystem.same_file("/test", "/test")
-        # IEEE 1003.1-2017 par. 4.13 for details
-        assert 0 == filesystem.same_file("/test", "//test")
-        assert 1 == filesystem.same_file("/test", "///test")
-        assert 1 == filesystem.same_file("/test", "/test/")
-        assert 1 == filesystem.same_file("/test", "/test//")
-        assert 1 == filesystem.same_file("/test", "/test///")
+        assert 1 == filesystem.same_directory("/test", "/test")
+        # IEEE 1003.1-2017 par. 4.13 allows // to be special, but realpath() treats it as /
+        assert 1 == filesystem.same_directory("/test", "//test")
+        assert 1 == filesystem.same_directory("/test", "///test")
+        assert 1 == filesystem.same_directory("/test", "/test/")
+        assert 1 == filesystem.same_directory("/test", "/test//")
+        assert 1 == filesystem.same_directory("/test", "/test///")
 
     def test_same(self):
-        assert 1 == filesystem.same_file("/home/123", "/home/123")
-        assert 1 == filesystem.same_file("D:\\", "D:\\")
-        assert 1 == filesystem.same_file("/test/../test", "/test")
-        assert 1 == filesystem.same_file("test/../test", "test")
-        assert 1 == filesystem.same_file("/test/./test", "/test/test")
-        assert 1 == filesystem.same_file("./test", "test")
+        assert 1 == filesystem.same_directory("/home/123", "/home/123")
+        assert 1 == filesystem.same_directory("/test/../test", "/test")
+        assert 1 == filesystem.same_directory("test/../test", "test")
+        assert 1 == filesystem.same_directory("/test/./test", "/test/test")
+        assert 1 == filesystem.same_directory("./test", "test")
 
     def test_subfolder(self):
-        assert 2 == filesystem.same_file("\\\\?\\C:\\", "\\\\?\\C:\\Users\\")
-        assert 2 == filesystem.same_file("/home/test123", "/home/test123/sub")
-        assert 2 == filesystem.same_file("/test", "/test/./test")
-        assert 2 == filesystem.same_file("/home/../test", "/test/./test")
+        assert 2 == filesystem.same_directory("/home/test123", "/home/test123/sub")
+        assert 2 == filesystem.same_directory("/test", "/test/./test")
+        # Not /home, on macOS that is a link and .. is resolved after following it
+        assert 2 == filesystem.same_directory("/sabnzbd_test/../test", "/test/./test")
 
-    @set_platform("win32")
-    def test_capitalization(self):
-        # Only matters on Windows/macOS
-        assert 1 == filesystem.same_file("/HOME/123", "/home/123")
-        assert 1 == filesystem.same_file("D:\\", "d:\\")
-        assert 2 == filesystem.same_file("\\\\?\\c:\\", "\\\\?\\C:\\Users\\")
+    @pytest.mark.skipif(not sys.platform.startswith("win"), reason="Relies on os.sep so should only run on Windows")
+    def test_windows(self):
+        assert 1 == filesystem.same_directory("D:\\", "D:\\")
+        assert 2 == filesystem.same_directory("\\\\?\\C:\\", "\\\\?\\C:\\Users\\")
+        assert 1 == filesystem.same_directory("/HOME/123", "/home/123")
+        assert 1 == filesystem.same_directory("D:\\", "d:\\")
+        assert 2 == filesystem.same_directory("\\\\?\\c:\\", "\\\\?\\C:\\Users\\")
+
+    def test_looks_likesubfolder_but_isnt(self):
+        assert 0 == filesystem.same_directory("/mnt/sabnzbd", "/mnt/sabnzbd-data")
 
     @pytest.mark.skipif(sys.platform.startswith(("win", "darwin")), reason="Requires a case-sensitive filesystem")
-    @set_platform("linux")
+    @pytest.mark.platform("linux")
     def test_capitalization_linux(self):
-        assert 2 == filesystem.same_file("/home/test123", "/home/test123/sub")
-        assert 0 == filesystem.same_file("/test", "/Test")
-        assert 0 == filesystem.same_file("tesT", "Test")
-        assert 0 == filesystem.same_file("/test/../Home", "/home")
+        assert 2 == filesystem.same_directory("/home/test123", "/home/test123/sub")
+        assert 0 == filesystem.same_directory("/test", "/Test")
+        assert 0 == filesystem.same_directory("tesT", "Test")
+        assert 0 == filesystem.same_directory("/test/../Home", "/home")
+
+    @needs_symlinks
+    def test_links_are_resolved(self, tmp_path):
+        base = str(tmp_path)
+        incomplete = os.path.join(base, "incomplete")
+        os.makedirs(os.path.join(incomplete, "sub"))
+        link_to_sub = os.path.join(base, "link_to_sub")
+        os.symlink(os.path.join(incomplete, "sub"), link_to_sub)
+        link_to_incomplete = os.path.join(base, "link_to_incomplete")
+        os.symlink(incomplete, link_to_incomplete)
+
+        assert 2 == filesystem.same_directory(incomplete, link_to_sub)
+        assert 1 == filesystem.same_directory(incomplete, link_to_incomplete)
+        assert 2 == filesystem.same_directory(link_to_incomplete, os.path.join(incomplete, "sub"))
+        assert 0 == filesystem.same_directory(link_to_sub, incomplete)
+
+
+class TestPointsIntoAdminDir:
+    def test_by_name(self, tmp_path):
+        base = str(tmp_path)
+        assert filesystem.points_into_admin_dir(os.path.join(base, JOB_ADMIN), base)
+        assert filesystem.points_into_admin_dir(os.path.join(base, JOB_ADMIN, "__verified__"), base)
+        assert filesystem.points_into_admin_dir(os.path.join(base, "sub", JOB_ADMIN, "__verified__"), base)
+
+    def test_regular_names_are_left_alone(self, tmp_path):
+        base = str(tmp_path)
+        assert not filesystem.points_into_admin_dir(os.path.join(base, "testfile.rar"), base)
+        assert not filesystem.points_into_admin_dir(os.path.join(base, "sub", "testfile.rar"), base)
+        # Only a full part counts, not a name that merely starts with it
+        assert not filesystem.points_into_admin_dir(os.path.join(base, JOB_ADMIN + "-data", "testfile.rar"), base)
+
+    @needs_symlinks
+    def test_link_cannot_hide_it(self, tmp_path):
+        """On Windows an NTFS 8.3 alias ("__ADMI~1") points at the admin folder under a
+        different name, exactly like a link does here, so the name cannot be trusted"""
+        base = str(tmp_path)
+        admin_dir = os.path.join(base, JOB_ADMIN)
+        os.mkdir(admin_dir)
+        linkname = os.path.join(base, "notadmin")
+        os.symlink(admin_dir, linkname)
+
+        assert filesystem.points_into_admin_dir(linkname, base)
+        assert filesystem.points_into_admin_dir(os.path.join(linkname, "__verified__"), base)
+
+    @pytest.mark.skipif(not sys.platform.startswith("win"), reason="NTFS 8.3 aliases only exist on Windows")
+    def test_ntfs_8dot3_alias_cannot_hide_it(self, tmp_path):
+        """The real thing the link above stands in for: NTFS keeps an 8.3 alias for every
+        long name, so "__ADMI~1" reaches the admin folder without ever spelling it out"""
+        import win32api
+
+        base = str(tmp_path)
+        admin_dir = os.path.join(base, JOB_ADMIN)
+        os.mkdir(admin_dir)
+
+        # Ask the filesystem for the alias instead of assuming what it generated
+        alias = os.path.basename(win32api.GetShortPathName(admin_dir))
+        if alias.lower() == JOB_ADMIN.lower():
+            pytest.skip("8.3 name creation is disabled on this volume")
+
+        assert filesystem.points_into_admin_dir(os.path.join(base, alias), base)
+        assert filesystem.points_into_admin_dir(os.path.join(base, alias, "__verified__"), base)
+
+        # And the rename that the alias was meant to sneak through has to fail
+        filename = os.path.join(base, "myfile.txt")
+        Path(filename).touch()
+        with pytest.raises(OSError):
+            filesystem.renamer(filename, os.path.join(base, alias, "__verified__"), create_local_directories=True)
+        assert os.path.isfile(filename)
+        assert not os.listdir(admin_dir)
+
+
+class TestPointsOutside:
+    def test_inside(self, tmp_path):
+        base = str(tmp_path)
+        assert not filesystem.points_outside(base, os.path.join(base, "file.bin"))
+        assert not filesystem.points_outside(base, os.path.join(base, "sub", "file.bin"))
+
+    def test_outside(self, tmp_path):
+        base = str(tmp_path)
+        assert filesystem.points_outside(base, os.path.join(base, os.pardir, "file.bin"))
+        assert filesystem.points_outside(base, os.path.join(base, "sub", os.pardir, os.pardir, "file.bin"))
+
+    @needs_symlinks
+    def test_root_reached_through_a_link_is_fine(self, tmp_path):
+        """The download and complete folder are allowed to be a link"""
+        base = str(tmp_path)
+        real = os.path.join(base, "real")
+        os.mkdir(real)
+        link = os.path.join(base, "link")
+        os.symlink(real, link)
+
+        assert not filesystem.points_outside(link, os.path.join(link, "file.bin"))
+        assert not filesystem.points_outside(link, os.path.join(real, "file.bin"))
+        assert not filesystem.points_outside(real, os.path.join(link, "file.bin"))
+        assert filesystem.points_outside(link, os.path.join(link, os.pardir, "file.bin"))
+
+    @pytest.mark.skipif(
+        sys.platform.startswith("win"), reason="Windows collapses '..' before the filesystem resolves links"
+    )
+    def test_link_inside_the_root_cannot_redirect(self, tmp_path):
+        base = str(tmp_path)
+        root = os.path.join(base, "root")
+        os.mkdir(root)
+        os.symlink(base, os.path.join(root, "up"))
+        os.symlink(".", os.path.join(root, "pivot"))
+
+        assert filesystem.points_outside(root, os.path.join(root, "up", "file.bin"))
+        assert filesystem.points_outside(root, os.path.join(root, "pivot", os.pardir, "file.bin"))
+        assert not filesystem.points_outside(root, os.path.join(root, "pivot", "file.bin"))
+
+
+class TestPointsIntoProgramDir:
+    @pytest.fixture
+    def prog_dir(self, tmp_path, monkeypatch):
+        prog_dir = os.path.join(str(tmp_path), "prog")
+        os.makedirs(os.path.join(prog_dir, "interfaces", "Glitter", "templates"))
+        monkeypatch.setattr(sabnzbd, "DIR_PROG", prog_dir)
+        return prog_dir
+
+    def test_program_dir(self, prog_dir):
+        assert filesystem.points_into_program_dir(prog_dir)
+        assert filesystem.points_into_program_dir(os.path.join(prog_dir, "interfaces", "Glitter", "templates"))
+        assert filesystem.points_into_program_dir(os.path.join(prog_dir, "Downloads"))
+        assert filesystem.points_into_program_dir(os.path.join(prog_dir, "Downloads", "other"))
+        assert filesystem.points_into_program_dir(os.path.join(prog_dir, "Downloads", "complete", os.pardir))
+
+    def test_default_download_dirs_allowed(self, prog_dir):
+        """Where they end up when the INI is stored in the program folder"""
+        assert not filesystem.points_into_program_dir(os.path.join(prog_dir, DEF_DOWNLOAD_DIR))
+        assert not filesystem.points_into_program_dir(os.path.join(prog_dir, DEF_COMPLETE_DIR))
+        assert not filesystem.points_into_program_dir(os.path.join(prog_dir, DEF_COMPLETE_DIR, "movies"))
+
+    def test_default_download_dirs_case_insensitive(self, prog_dir, monkeypatch):
+        """On macOS and Windows another casing is the same folder"""
+        monkeypatch.setattr(sabnzbd, "MACOS", True)
+        assert not filesystem.points_into_program_dir(os.path.join(prog_dir, DEF_COMPLETE_DIR.upper(), "movies"))
+        assert filesystem.points_into_program_dir(os.path.join(prog_dir, "INTERFACES"))
+
+    def test_long_path(self, prog_dir):
+        assert not filesystem.points_into_program_dir(
+            filesystem.long_path(os.path.join(prog_dir, DEF_COMPLETE_DIR, "movies"))
+        )
+        assert filesystem.points_into_program_dir(filesystem.long_path(os.path.join(prog_dir, "interfaces")))
+
+    def test_outside(self, prog_dir):
+        assert not filesystem.points_into_program_dir(prog_dir + "-data")
+        assert not filesystem.points_into_program_dir(os.path.join(os.path.dirname(prog_dir), "complete"))
+
+    def test_parent_of_program_dir(self, prog_dir):
+        """Jobs without a job folder could otherwise write into the program folder"""
+        parent_dir = os.path.dirname(prog_dir)
+        assert filesystem.points_into_program_dir(parent_dir, without_job_folder=True)
+        assert filesystem.points_into_program_dir(os.path.dirname(parent_dir), without_job_folder=True)
+        # Each job gets its own new folder, so it cannot end up in the program folder
+        assert not filesystem.points_into_program_dir(parent_dir)
+        # The program folder itself is never allowed
+        assert filesystem.points_into_program_dir(prog_dir)
+
+    @needs_symlinks
+    def test_link_into_program_dir(self, prog_dir):
+        link = os.path.join(os.path.dirname(prog_dir), "complete")
+        os.symlink(os.path.join(prog_dir, "interfaces"), link)
+        assert filesystem.points_into_program_dir(link)
+        assert filesystem.points_into_program_dir(os.path.join(link, "Glitter", "templates"))
+
+    @needs_symlinks
+    def test_link_inside_allowed_dir(self, prog_dir):
+        complete_dir = os.path.join(prog_dir, DEF_COMPLETE_DIR)
+        os.makedirs(complete_dir)
+        os.symlink(os.path.join(prog_dir, "interfaces"), os.path.join(complete_dir, "link"))
+        assert filesystem.points_into_program_dir(os.path.join(complete_dir, "link", "Glitter"))
+
+    @needs_symlinks
+    def test_allowed_dir_as_link(self, prog_dir):
+        """A linked default folder should not make its target allowed"""
+        os.makedirs(os.path.join(prog_dir, "Downloads"))
+        interfaces = os.path.join(prog_dir, "interfaces")
+        os.symlink(interfaces, os.path.join(prog_dir, DEF_COMPLETE_DIR), target_is_directory=True)
+        assert filesystem.points_into_program_dir(os.path.join(prog_dir, DEF_COMPLETE_DIR))
+        assert filesystem.points_into_program_dir(interfaces)
+
+    @needs_symlinks
+    def test_allowed_dir_linked_outside(self, prog_dir, tmp_path):
+        outside = os.path.join(str(tmp_path), "outside")
+        os.makedirs(outside)
+        os.makedirs(os.path.join(prog_dir, "Downloads"))
+        os.symlink(outside, os.path.join(prog_dir, DEF_COMPLETE_DIR), target_is_directory=True)
+        assert not filesystem.points_into_program_dir(os.path.join(prog_dir, DEF_COMPLETE_DIR, "movies"))
+
+
+class TestMoveToPath:
+    @pytest.mark.config({"overwrite_files": True})
+    @pytest.mark.parametrize(
+        "destination_kind",
+        ["outside", pytest.param("parent_link", marks=needs_symlinks), pytest.param("leaf_link", marks=needs_symlinks)],
+    )
+    def test_outside_destination_is_not_deleted(self, tmp_path, destination_kind):
+        root = tmp_path / "complete"
+        outside = tmp_path / "outside"
+        root.mkdir()
+        outside.mkdir()
+        source = tmp_path / "source.bin"
+        source.write_bytes(b"new data")
+        victim = outside / "victim.bin"
+        victim.write_bytes(b"keep me")
+
+        if destination_kind == "parent_link":
+            (root / "sub").symlink_to(outside, target_is_directory=True)
+            destination = root / "sub" / victim.name
+        elif destination_kind == "leaf_link":
+            destination = root / victim.name
+            destination.symlink_to(victim)
+        else:
+            destination = victim
+
+        assert filesystem.move_to_path(str(source), str(destination), root=str(root)) == (False, None)
+        assert victim.read_bytes() == b"keep me"
+        assert source.read_bytes() == b"new data"
+        if destination_kind == "leaf_link":
+            assert destination.is_symlink()
+
+    @pytest.mark.config({"overwrite_files": True})
+    @pytest.mark.parametrize("with_root", [True, False])
+    def test_existing_destination_inside_root_is_overwritten(self, tmp_path, with_root):
+        root = tmp_path / "complete"
+        root.mkdir()
+        source = tmp_path / "source.bin"
+        source.write_bytes(b"new data")
+        destination = root / "moved.bin"
+        destination.write_bytes(b"old data")
+
+        assert filesystem.move_to_path(str(source), str(destination), root=str(root) if with_root else None) == (
+            True,
+            str(destination),
+        )
+        assert destination.read_bytes() == b"new data"
+        assert not source.exists()
+
+    @needs_symlinks
+    @pytest.mark.config({"overwrite_files": False})
+    def test_outside_leaf_link_gets_unique_destination(self, tmp_path):
+        root = tmp_path / "complete"
+        root.mkdir()
+        source = tmp_path / "source.bin"
+        source.write_bytes(b"new data")
+        victim = tmp_path / "victim.bin"
+        victim.write_bytes(b"keep me")
+        destination = root / victim.name
+        destination.symlink_to(victim)
+        unique = root / "victim.1.bin"
+
+        assert filesystem.move_to_path(str(source), str(destination), root=str(root)) == (True, str(unique))
+        assert unique.read_bytes() == b"new data"
+        assert victim.read_bytes() == b"keep me"
+        assert destination.is_symlink()
+        assert not source.exists()
+
+    @needs_symlinks
+    def test_link_in_a_parent_cannot_redirect(self, tmp_path):
+        """A linked directory in the path redirects the move just like a linked leaf"""
+        base = str(tmp_path)
+        root = os.path.join(base, "complete")
+        outside = os.path.join(base, "outside")
+        os.makedirs(root)
+        os.makedirs(outside)
+        os.symlink(outside, os.path.join(root, "sub"))
+
+        source = os.path.join(base, "source.bin")
+        Path(source).touch()
+        ok, new_path = filesystem.move_to_path(source, os.path.join(root, "sub", "moved.bin"), root=root)
+
+        assert not ok
+        assert not new_path
+        assert os.path.isfile(source)
+        assert not os.listdir(outside)
+
+    def test_move_inside_the_root_still_works(self, tmp_path):
+        base = str(tmp_path)
+        root = os.path.join(base, "complete")
+        os.makedirs(root)
+        source = os.path.join(base, "source.bin")
+        Path(source).touch()
+
+        ok, new_path = filesystem.move_to_path(source, os.path.join(root, "sub", "moved.bin"), root=root)
+
+        assert ok
+        assert os.path.isfile(new_path)
+        assert not os.path.isfile(source)
+
+
+class TestFirstExistingPath:
+    def test_existing_path(self, tmp_path):
+        assert filesystem.first_existing_path(str(tmp_path)) == str(tmp_path)
+
+    def test_walks_up_to_existing_parent(self, tmp_path):
+        assert filesystem.first_existing_path(str(tmp_path / "not" / "created" / "yet")) == str(tmp_path)
+
+
+class TestSameDevice:
+    def test_same_path(self, tmp_path):
+        assert filesystem.same_device(str(tmp_path), str(tmp_path)) is True
+
+    def test_sibling_folders(self, tmp_path):
+        download_dir = tmp_path / "download"
+        complete_dir = tmp_path / "complete"
+        download_dir.mkdir()
+        complete_dir.mkdir()
+        assert filesystem.same_device(str(download_dir), str(complete_dir)) is True
+
+    def test_folders_not_created_yet(self, tmp_path):
+        """Falls back on the first existing parent, so both resolve to tmp_path"""
+        assert filesystem.same_device(str(tmp_path / "download"), str(tmp_path / "complete" / "sub")) is True
+
+    @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Relies on /proc being its own filesystem")
+    def test_separate_devices(self, tmp_path):
+        assert filesystem.same_device(str(tmp_path), "/proc") is False
+
+    @pytest.mark.skipif(not sys.platform.startswith("win"), reason="Windows only has drive letters")
+    def test_different_drives_win(self):
+        assert filesystem.same_device("C:\\downloads", "D:\\complete") is False
+
+    def test_undeterminable_path(self, tmp_path):
+        """Fall back on separate devices, so the caller keeps reserving space for a copy"""
+        with mock.patch("os.stat", side_effect=OSError):
+            assert filesystem.same_device(str(tmp_path / "a"), str(tmp_path / "b")) is False
 
 
 class TestClipLongPath:
@@ -347,18 +879,18 @@ class TestClipLongPath:
         assert filesystem.clip_path(None) is None
         assert filesystem.long_path(None) is None
 
-    @set_platform("win32")
+    @pytest.mark.platform("win32")
     def test_clip_path_win(self):
         assert filesystem.clip_path(r"\\?\UNC\test") == r"\\test"
         assert filesystem.clip_path(r"\\?\F:\test") == r"F:\test"
 
-    @set_platform("win32")
+    @pytest.mark.platform("win32")
     def test_nothing_to_clip_win(self):
         assert filesystem.clip_path(r"\\test") == r"\\test"
         assert filesystem.clip_path(r"F:\test") == r"F:\test"
         assert filesystem.clip_path("/test/dir") == "/test/dir"
 
-    @set_platform("linux")
+    @pytest.mark.platform("linux")
     def test_clip_path_non_win(self):
         # Shouldn't have any effect on platforms other than Windows
         assert filesystem.clip_path(r"\\?\UNC\test") == r"\\?\UNC\test"
@@ -367,17 +899,17 @@ class TestClipLongPath:
         assert filesystem.clip_path(r"F:\test") == r"F:\test"
         assert filesystem.clip_path("/test/dir") == "/test/dir"
 
-    @set_platform("win32")
+    @pytest.mark.platform("win32")
     def test_long_path_win(self):
         assert filesystem.long_path(r"\\test") == r"\\?\UNC\test"
         assert filesystem.long_path(r"F:\test") == r"\\?\F:\test"
 
-    @set_platform("win32")
+    @pytest.mark.platform("win32")
     def test_nothing_to_lenghten_win(self):
         assert filesystem.long_path(r"\\?\UNC\test") == r"\\?\UNC\test"
         assert filesystem.long_path(r"\\?\F:\test") == r"\\?\F:\test"
 
-    @set_platform("linux")
+    @pytest.mark.platform("linux")
     def test_long_path_non_win(self):
         # Shouldn't have any effect on platforms other than Windows
         assert filesystem.long_path(r"\\?\UNC\test") == r"\\?\UNC\test"
@@ -388,167 +920,132 @@ class TestClipLongPath:
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="Non-Windows tests")
-class TestCheckMountLinux(ffs.TestCase):
-    # Our collection of fake directories
-    test_dirs = ["/media/test/dir", "/mnt/TEST/DIR"]
+@pytest.mark.platform("linux")
+@pytest.mark.fake_fs(
+    {
+        "path_separator": "/",
+        "is_case_sensitive": True,
+        "create_dirs": ["/media/test/dir", "/mnt/TEST/DIR"],
+    }
+)
+class TestCheckMountLinux:
+    def test_bare_mountpoint_linux(self, fake_fs):
+        assert filesystem.mount_is_available("/media") is True
+        assert filesystem.mount_is_available("/media/") is True
+        assert filesystem.mount_is_available("/mnt") is True
+        assert filesystem.mount_is_available("/mnt/") is True
 
-    def setUp(self):
-        self.setUpPyfakefs()
-        self.fs.path_separator = "/"
-        self.fs.is_case_sensitive = True
-        for test_dir in self.test_dirs:
-            self.fs.create_dir(test_dir, perm_bits=755)
-            # Sanity check the fake filesystem
-            assert os.path.exists(test_dir) is True
+    def test_existing_dir_linux(self, fake_fs):
+        assert filesystem.mount_is_available("/media/test") is True
+        assert filesystem.mount_is_available("/media/test/dir/") is True
+        assert filesystem.mount_is_available("/media/test/DIR/") is True
+        assert filesystem.mount_is_available("/mnt/TEST") is True
+        assert filesystem.mount_is_available("/mnt/TEST/dir/") is True
+        assert filesystem.mount_is_available("/mnt/TEST/DIR/") is True
 
-    @set_platform("linux")
-    def test_bare_mountpoint_linux(self):
-        assert filesystem.check_mount("/media") is True
-        assert filesystem.check_mount("/media/") is True
-        assert filesystem.check_mount("/mnt") is True
-        assert filesystem.check_mount("/mnt/") is True
-
-    @set_platform("linux")
-    def test_existing_dir_linux(self):
-        assert filesystem.check_mount("/media/test") is True
-        assert filesystem.check_mount("/media/test/dir/") is True
-        assert filesystem.check_mount("/media/test/DIR/") is True
-        assert filesystem.check_mount("/mnt/TEST") is True
-        assert filesystem.check_mount("/mnt/TEST/dir/") is True
-        assert filesystem.check_mount("/mnt/TEST/DIR/") is True
-
-    @set_platform("linux")
-    # Cut down a bit on the waiting time
-    @set_config({"wait_ext_drive": 1})
-    def test_dir_nonexistent_linux(self):
+    def test_dir_nonexistent_linux(self, fake_fs, sleepless):
         # Filesystem is case-sensitive on this platform
-        assert filesystem.check_mount("/media/TEST") is False  # Issue #1457
-        assert filesystem.check_mount("/media/TesT/") is False
-        assert filesystem.check_mount("/mnt/TeSt/DIR") is False
-        assert filesystem.check_mount("/mnt/test/DiR/") is False
+        assert filesystem.mount_is_available("/media/TEST") is False  # Issue #1457
+        assert filesystem.mount_is_available("/media/TesT/") is False
+        assert filesystem.mount_is_available("/mnt/TeSt/DIR") is False
+        assert filesystem.mount_is_available("/mnt/test/DiR/") is False
 
-    @set_platform("linux")
-    def test_dir_outsider_linux(self):
+    def test_dir_outsider_linux(self, fake_fs):
         # Outside of /media and /mnt
-        assert filesystem.check_mount("/test/that/") is True
+        assert filesystem.mount_is_available("/test/that/") is True
         # Root directory
-        assert filesystem.check_mount("/") is True
+        assert filesystem.mount_is_available("/") is True
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="Non-Windows tests")
-class TestCheckMountDarwin(ffs.TestCase):
-    # Our faked macos directory
-    test_dir = "/Volumes/test/dir"
+@pytest.mark.platform("macos")
+@pytest.mark.fake_fs(
+    {
+        "create_dirs": ["/Volumes/test/dir"],
+    }
+)
+class TestCheckMountMacOS:
+    def test_bare_mountpoint_macos(self, fake_fs):
+        assert filesystem.mount_is_available("/Volumes") is True
+        assert filesystem.mount_is_available("/Volumes/") is True
 
-    def setUp(self):
-        self.setUpPyfakefs()
-        self.fs.is_macos = True
-        self.fs.is_case_sensitive = False
-        self.fs.path_separator = "/"
-        self.fs.create_dir(self.test_dir, perm_bits=755)
-        # Verify the fake filesystem does its thing
-        assert os.path.exists(self.test_dir) is True
-
-    @set_platform("darwin")
-    def test_bare_mountpoint_darwin(self):
-        assert filesystem.check_mount("/Volumes") is True
-        assert filesystem.check_mount("/Volumes/") is True
-
-    @set_platform("darwin")
-    def test_existing_dir_darwin(self):
-        assert filesystem.check_mount("/Volumes/test") is True
-        assert filesystem.check_mount("/Volumes/test/dir/") is True
+    def test_existing_dir_macos(self, fake_fs):
+        assert filesystem.mount_is_available("/Volumes/test") is True
+        assert filesystem.mount_is_available("/Volumes/test/dir/") is True
         # Filesystem is set case-insensitive for this platform
-        assert filesystem.check_mount("/VOLUMES/test") is True
-        assert filesystem.check_mount("/volumes/Test/dir/") is True
+        assert filesystem.mount_is_available("/VOLUMES/test") is True
+        assert filesystem.mount_is_available("/volumes/Test/dir/") is True
 
-    @set_platform("darwin")
-    # Cut down a bit on the waiting time
-    @set_config({"wait_ext_drive": 1})
-    def test_dir_nonexistent_darwin(self):
+    def test_dir_nonexistent_macos(self, fake_fs, sleepless):
         # Within /Volumes
-        assert filesystem.check_mount("/Volumes/nosuchdir") is False  # Issue #1457
-        assert filesystem.check_mount("/Volumes/noSuchDir/") is False
-        assert filesystem.check_mount("/Volumes/nosuchDIR/subdir") is False
-        assert filesystem.check_mount("/Volumes/NOsuchdir/subdir/") is False
+        assert filesystem.mount_is_available("/Volumes/nosuchdir") is False  # Issue #1457
+        assert filesystem.mount_is_available("/Volumes/noSuchDir/") is False
+        assert filesystem.mount_is_available("/Volumes/nosuchDIR/subdir") is False
+        assert filesystem.mount_is_available("/Volumes/NOsuchdir/subdir/") is False
 
-    @set_platform("darwin")
-    def test_dir_outsider_darwin(self):
+    def test_dir_outsider_macos(self, fake_fs):
         # Outside of /Volumes
-        assert filesystem.check_mount("/test/that/") is True
+        assert filesystem.mount_is_available("/test/that/") is True
         # Root directory
-        assert filesystem.check_mount("/") is True
+        assert filesystem.mount_is_available("/") is True
 
 
-class TestCheckMountWin(ffs.TestCase):
-    # Our faked windows directory
-    test_dir = r"F:\test\dir"
-
-    def setUp(self):
-        self.setUpPyfakefs()
-        self.fs.is_windows_fs = True
-        self.fs.is_case_sensitive = False
-        self.fs.path_separator = "\\"
-        self.fs.create_dir(self.test_dir)
-        # Sanity check the fake filesystem
-        assert os.path.exists(self.test_dir) is True
-
-    @set_platform("win32")
-    def test_existing_dir_win(self):
-        assert filesystem.check_mount("F:\\test") is True
-        assert filesystem.check_mount("F:\\test\\dir\\") is True
+@pytest.mark.platform("win32")
+@pytest.mark.fake_fs(
+    {
+        "create_dirs": [r"F:\test\dir"],
+    }
+)
+class TestCheckMountWin:
+    def test_existing_dir_win(self, fake_fs):
+        assert filesystem.mount_is_available("F:\\test") is True
+        assert filesystem.mount_is_available("F:\\test\\dir\\") is True
         # Filesystem and drive letters are case-insensitive on this platform
-        assert filesystem.check_mount("f:\\Test") is True
-        assert filesystem.check_mount("f:\\test\\DIR\\") is True
+        assert filesystem.mount_is_available("f:\\Test") is True
+        assert filesystem.mount_is_available("f:\\test\\DIR\\") is True
 
-    @set_platform("win32")
-    def test_bare_mountpoint_win(self):
-        assert filesystem.check_mount("F:\\") is True
-        assert filesystem.check_mount("Z:\\") is False
+    def test_bare_mountpoint_win(self, fake_fs, sleepless):
+        assert filesystem.mount_is_available("F:\\") is True
+        assert filesystem.mount_is_available("Z:\\") is False
 
-    @set_platform("win32")
-    def test_dir_nonexistent_win(self):
-        # The existance of the drive letter is what really matters
-        assert filesystem.check_mount("F:\\NoSuchDir") is True
-        assert filesystem.check_mount("F:\\NoSuchDir\\") is True
-        assert filesystem.check_mount("F:\\NOsuchdir\\subdir") is True
-        assert filesystem.check_mount("F:\\nosuchDIR\\subdir\\") is True
+    def test_dir_nonexistent_win(self, fake_fs):
+        # The existence of the drive letter is what really matters
+        assert filesystem.mount_is_available("F:\\NoSuchDir") is True
+        assert filesystem.mount_is_available("F:\\NoSuchDir\\") is True
+        assert filesystem.mount_is_available("F:\\NOsuchdir\\subdir") is True
+        assert filesystem.mount_is_available("F:\\nosuchDIR\\subdir\\") is True
 
-    @set_platform("win32")
-    # Cut down a bit on the waiting time
-    @set_config({"wait_ext_drive": 1})
-    def test_dir_on_nonexistent_drive_win(self):
+    def test_dir_on_nonexistent_drive_win(self, fake_fs, sleepless):
         # Non-existent drive-letter
-        assert filesystem.check_mount("H:\\NoSuchDir") is False
-        assert filesystem.check_mount("E:\\NoSuchDir\\") is False
-        assert filesystem.check_mount("L:\\NOsuchdir\\subdir") is False
-        assert filesystem.check_mount("L:\\nosuchDIR\\subdir\\") is False
+        assert filesystem.mount_is_available("H:\\NoSuchDir") is False
+        assert filesystem.mount_is_available("E:\\NoSuchDir\\") is False
+        assert filesystem.mount_is_available("L:\\NOsuchdir\\subdir") is False
+        assert filesystem.mount_is_available("L:\\nosuchDIR\\subdir\\") is False
 
-    @set_platform("win32")
-    def test_dir_outsider_win(self):
+    def test_dir_outsider_win(self, fake_fs):
         # Outside the local filesystem
-        assert filesystem.check_mount("//test/that/") is True
+        assert filesystem.mount_is_available("//test/that/") is True
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="Non-Windows tests")
-class TestListdirFull(ffs.TestCase):
-    # Basic fake filesystem setup stanza
-    def setUp(self):
-        self.setUpPyfakefs()
-        self.fs.path_separator = "/"
-        self.fs.is_case_sensitive = True
-
+@pytest.mark.fake_fs(
+    {
+        "path_separator": "/",
+        "is_case_sensitive": True,
+    }
+)
+class TestListdirFull:
     def test_nonexistent_dir(self):
         assert filesystem.listdir_full("/foo/bar") == []
 
-    def test_no_exceptions(self):
+    def test_no_exceptions(self, fake_fs):
         test_files = (
             "/test/dir/file1.ext",
             "/test/dir/file2",
             "/test/dir/sub/sub/sub/dir/file3.ext",
         )
         for file in test_files:
-            self.fs.create_file(file)
+            fake_fs.create_file(file)
             assert os.path.exists(file) is True
         # List our fake directory structure
         results_subdir = filesystem.listdir_full("/test/dir")
@@ -572,10 +1069,10 @@ class TestListdirFull(ffs.TestCase):
         assert filesystem.listdir_full(r"/test/dir/sub", recursive=False) == []
         assert len(filesystem.listdir_full(r"/test/dir", recursive=False)) == 2
 
-    def test_exception_appledouble(self):
+    def test_exception_appledouble(self, fake_fs):
         # Anything below a .AppleDouble directory should be omitted
         test_file = "/foo/bar/.AppleDouble/Oooooo.ps"
-        self.fs.create_file(test_file)
+        fake_fs.create_file(test_file)
         assert os.path.exists(test_file) is True
         assert filesystem.listdir_full("/foo") == []
         assert filesystem.listdir_full("/foo/bar") == []
@@ -584,14 +1081,14 @@ class TestListdirFull(ffs.TestCase):
         assert filesystem.listdir_full("/foo/bar", recursive=False) == []
         assert filesystem.listdir_full("/foo/bar/.AppleDouble", recursive=False) == []
 
-    def test_exception_dsstore(self):
+    def test_exception_dsstore(self, fake_fs):
         # Anything below a .DS_Store directory should be omitted
         for file in (
             "/some/FILE",
             "/some/.DS_Store/oh.NO",
             "/some/.DS_Store/subdir/The.End",
         ):
-            self.fs.create_file(file)
+            fake_fs.create_file(file)
             assert os.path.exists(file) is True
         assert filesystem.listdir_full("/some") == ["/some/FILE"]
         assert filesystem.listdir_full("/some/.DS_Store/") == []
@@ -600,34 +1097,38 @@ class TestListdirFull(ffs.TestCase):
         assert filesystem.listdir_full("/some/.DS_Store/", recursive=False) == []
         assert filesystem.listdir_full("/some/.DS_Store/subdir", recursive=False) == []
 
-    def test_invalid_file_argument(self):
+    def test_exception_resource_files(self, fake_fs):
+        for file in (
+            "/rsc/base_file",
+            "/rsc/._base_file",
+            "/rsc/not._base_file",
+        ):
+            fake_fs.create_file(file)
+            assert os.path.exists(file) is True
+        assert sorted(filesystem.listdir_full("/rsc")) == ["/rsc/base_file", "/rsc/not._base_file"]
+
+    def test_invalid_file_argument(self, fake_fs):
         # This is obviously not intended use; the function expects a directory
         # as its argument, not a file. Test anyway.
         test_file = "/dev/sleepy"
-        self.fs.create_file(test_file)
+        fake_fs.create_file(test_file)
         assert os.path.exists(test_file) is True
         assert filesystem.listdir_full(test_file) == []
 
 
-class TestListdirFullWin(ffs.TestCase):
-    # Basic fake filesystem setup stanza
-    def setUp(self):
-        self.setUpPyfakefs()
-        self.fs.is_windows_fs = True
-        self.fs.path_separator = "\\"
-        self.fs.is_case_sensitive = False
-
+@pytest.mark.platform("win32")
+class TestListdirFullWin:
     def test_nonexistent_dir(self):
         assert filesystem.listdir_full(r"F:\foo\bar") == []
 
-    def test_no_exceptions(self):
+    def test_no_exceptions(self, fake_fs):
         test_files = (
             r"f:\test\dir\file1.ext",
             r"f:\test\dir\file2",
             r"f:\test\dir\sub\sub\sub\dir\file3.ext",
         )
         for file in test_files:
-            self.fs.create_file(file)
+            fake_fs.create_file(file)
             assert os.path.exists(file) is True
         # List our fake directory structure
         results_subdir = filesystem.listdir_full(r"f:\test\dir")
@@ -651,10 +1152,10 @@ class TestListdirFullWin(ffs.TestCase):
         assert filesystem.listdir_full(r"F:\test\dir\SUB", recursive=False) == []
         assert len(filesystem.listdir_full(r"f:\test\dir", recursive=False)) == 2
 
-    def test_exception_appledouble(self):
+    def test_exception_appledouble(self, fake_fs):
         # Anything below a .AppleDouble directory should be omitted
         test_file = r"f:\foo\bar\.AppleDouble\Oooooo.ps"
-        self.fs.create_file(test_file)
+        fake_fs.create_file(test_file)
         assert os.path.exists(test_file) is True
         assert filesystem.listdir_full(r"f:\foo") == []
         assert filesystem.listdir_full(r"f:\foo\bar") == []
@@ -663,14 +1164,14 @@ class TestListdirFullWin(ffs.TestCase):
         assert filesystem.listdir_full(r"f:\foo\bar", recursive=False) == []
         assert filesystem.listdir_full(r"F:\foo\bar\.AppleDouble", recursive=False) == []
 
-    def test_exception_dsstore(self):
+    def test_exception_dsstore(self, fake_fs):
         # Anything below a .DS_Store directory should be omitted
         for file in (
             r"f:\some\FILE",
             r"f:\some\.DS_Store\oh.NO",
             r"f:\some\.DS_Store\subdir\The.End",
         ):
-            self.fs.create_file(file)
+            fake_fs.create_file(file)
             assert os.path.exists(file) is True
         assert filesystem.listdir_full(r"f:\some") == [r"f:\some\FILE"]
         assert filesystem.listdir_full(r"f:\some\.DS_Store") == []
@@ -679,139 +1180,155 @@ class TestListdirFullWin(ffs.TestCase):
         assert filesystem.listdir_full(r"f:\some\.DS_Store", recursive=True) == []
         assert filesystem.listdir_full(r"f:\some\.DS_Store\subdir", recursive=True) == []
 
-    def test_invalid_file_argument(self):
+    def test_exception_resource_files(self, fake_fs):
+        for file in (
+            r"f:\rsc\base_file",
+            r"f:\rsc\._base_file",
+            r"f:\rsc\not._base_file",
+        ):
+            fake_fs.create_file(file)
+            assert os.path.exists(file) is True
+        assert sorted(filesystem.listdir_full(r"f:\rsc")) == [r"f:\rsc\base_file", r"f:\rsc\not._base_file"]
+
+    def test_invalid_file_argument(self, fake_fs):
         # This is obviously not intended use; the function expects a directory
         # as its argument, not a file. Test anyway.
         test_file = r"f:\dev\sleepy"
-        self.fs.create_file(test_file)
+        fake_fs.create_file(test_file)
         assert os.path.exists(test_file) is True
         assert filesystem.listdir_full(test_file) == []
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="Non-Windows tests")
-class TestGetUniquePathFilename(ffs.TestCase):
-    # Basic fake filesystem setup stanza
-    def setUp(self):
-        self.setUpPyfakefs()
-        self.fs.path_separator = "/"
-        self.fs.is_case_sensitive = True
-
+@pytest.mark.fake_fs(
+    {
+        "path_separator": "/",
+        "is_case_sensitive": True,
+    }
+)
+class TestGetUniqueDirFilename:
     # Reduce the waiting time when the function calls check_mount()
-    @set_config({"wait_ext_drive": 1})
-    def test_nonexistent_dir(self):
+    @pytest.mark.config({"wait_ext_drive": 1})
+    def test_nonexistent_dir(self, fake_fs, sleepless):
         # Absolute path
-        assert filesystem.get_unique_path("/foo/bar", n=0, create_dir=False) == "/foo/bar"
+        assert filesystem.get_unique_dir("/foo/bar", n=0, create_dir=False) == "/foo/bar"
         # Absolute path in a location that matters to check_mount
-        assert filesystem.get_unique_path("/mnt/foo/bar", n=0, create_dir=False) == "/mnt/foo/bar"
+        assert filesystem.get_unique_dir("/mnt/foo/bar", n=0, create_dir=False) == "/mnt/foo/bar"
         # Relative path
-        if self.fs.cwd != "/":
+        if fake_fs.cwd != "/":
             os.chdir("/")
-        assert filesystem.get_unique_path("foo/bar", n=0, create_dir=False) == "foo/bar"
+        assert filesystem.get_unique_dir("foo/bar", n=0, create_dir=False) == "foo/bar"
 
-    def test_creating_dir(self):
+    def test_nonexistent_dir_without_permission(self, fake_fs):
+        some_dir = "/foo/bar"
+        fake_fs.create_dir(some_dir)
+
+        # Remove write permission from the directory.
+        os.chmod(some_dir, 0o500)
+
+        assert filesystem.get_unique_dir(os.path.join(some_dir, "nonexistent"), create_dir=True) is False
+
+    def test_creating_dir(self, fake_fs):
         # First call also creates the directory for us
-        assert filesystem.get_unique_path("/foo/bar", n=0, create_dir=True) == "/foo/bar"
+        assert filesystem.get_unique_dir("/foo/bar", n=0, create_dir=True) == "/foo/bar"
         # Verify creation of the path
         assert os.path.exists("/foo/bar") is True
         # Directories from previous loops get in the way
         for dir_n in range(1, 11):  # Go high enough for double digits
-            assert filesystem.get_unique_path("/foo/bar", n=0, create_dir=True) == "/foo/bar." + str(dir_n)
+            assert filesystem.get_unique_dir("/foo/bar", n=0, create_dir=True) == "/foo/bar." + str(dir_n)
             assert os.path.exists("/foo/bar." + str(dir_n)) is True
         # Explicitly set parameter n
-        assert filesystem.get_unique_path("/foo/bar", n=666, create_dir=True) == "/foo/bar.666"
+        assert filesystem.get_unique_dir("/foo/bar", n=666, create_dir=True) == "/foo/bar.666"
         assert os.path.exists("/foo/bar.666") is True
 
-    def test_nonexistent_file(self):
+    def test_nonexistent_file(self, fake_fs):
         assert filesystem.get_unique_filename("/dir/file.name") == "/dir/file.name"
         # Relative path
         assert filesystem.get_unique_filename("dir/file.name") == "dir/file.name"
 
-    def test_existing_file(self):
+    def test_existing_file(self, fake_fs):
         test_file = "/dir/file.name"
         max_obstruct = 11  # High enough for double digits
-        self.fs.create_file(test_file)
+        fake_fs.create_file(test_file)
         assert os.path.exists(test_file)
         # Create obstructions
         for n in range(1, max_obstruct):
             file_n = "/dir/file." + str(n) + ".name"
-            self.fs.create_file(file_n)
+            fake_fs.create_file(file_n)
             assert os.path.exists(file_n)
         assert filesystem.get_unique_filename(test_file) == "/dir/file." + str(max_obstruct) + ".name"
 
-    def test_existing_file_without_extension(self):
+    def test_existing_file_without_extension(self, fake_fs):
         test_file = "/some/filename"
         # Create obstructions
-        self.fs.create_file(test_file)
+        fake_fs.create_file(test_file)
         assert os.path.exists(test_file)
-        assert filesystem.get_unique_filename(test_file) == "/some/filename.1"
+        first_filename = filesystem.get_unique_filename(test_file)
+        assert first_filename == "/some/filename.1"
+        fake_fs.create_file(first_filename)
+        assert filesystem.get_unique_filename(test_file) == "/some/filename.2"
+
+    def test_dangling_link_is_taken(self, tmp_path):
+        """A link whose target is missing still occupies the name, and handing it out would
+        write through it to wherever it points"""
+        base = str(tmp_path)
+        test_file = os.path.join(base, "file.name")
+        Path(test_file).touch()
+        os.symlink(os.path.join(base, "does_not_exist"), os.path.join(base, "file.1.name"))
+
+        assert filesystem.get_unique_filename(test_file) == os.path.join(base, "file.2.name")
 
 
 @pytest.mark.skipif(not sys.platform.startswith("win"), reason="Windows specific tests")
-class TestGetUniquePathFilenameWin(ffs.TestCase):
-    # Basic fake filesystem setup stanza
-    def setUp(self):
-        self.setUpPyfakefs()
-        self.fs.is_windows_fs = True
-        self.fs.path_separator = "\\"
-        self.fs.is_case_sensitive = False
-
-    # Reduce the waiting time when the function calls check_mount()
-    @set_config({"wait_ext_drive": 1})
-    def test_nonexistent_dir(self):
+class TestGetUniqueDirFilenameWin:
+    def test_nonexistent_dir(self, fake_fs, sleepless):
         # Absolute path
-        assert filesystem.get_unique_path(r"C:\No\Such\Dir", n=0, create_dir=False).lower() == r"c:\no\such\dir"
+        assert filesystem.get_unique_dir(r"C:\No\Such\Dir", n=0, create_dir=False).lower() == r"c:\no\such\dir"
         # Relative path
-        assert filesystem.get_unique_path(r"foo\bar", n=0, create_dir=False).lower() == r"foo\bar"
+        assert filesystem.get_unique_dir(r"foo\bar", n=0, create_dir=False).lower() == r"foo\bar"
 
-    def test_creating_dir(self):
+    def test_creating_dir(self, fake_fs):
         # First call also creates the directory for us
-        assert filesystem.get_unique_path(r"C:\foo\BAR", n=0, create_dir=True).lower() == r"c:\foo\bar"
+        assert filesystem.get_unique_dir(r"C:\foo\BAR", n=0, create_dir=True).lower() == r"c:\foo\bar"
         # Verify creation of the path
         assert os.path.exists(r"c:\foo\bar") is True
         # Directories from previous loops get in the way
         for dir_n in range(1, 11):  # Go high enough for double digits
-            assert filesystem.get_unique_path(r"c:\foo\bar", n=0, create_dir=True) == r"c:\foo\bar." + str(dir_n)
+            assert filesystem.get_unique_dir(r"c:\foo\bar", n=0, create_dir=True) == r"c:\foo\bar." + str(dir_n)
             assert os.path.exists(r"c:\foo\bar." + str(dir_n)) is True
         # Explicitly set parameter n
-        assert filesystem.get_unique_path(r"c:\Foo\Bar", n=666, create_dir=True).lower() == r"c:\foo\bar.666"
+        assert filesystem.get_unique_dir(r"c:\Foo\Bar", n=666, create_dir=True).lower() == r"c:\foo\bar.666"
         assert os.path.exists(r"c:\foo\bar.666") is True
 
-    def test_nonexistent_file(self):
+    def test_nonexistent_file(self, fake_fs):
         assert filesystem.get_unique_filename(r"C:\DIR\file.name").lower() == r"c:\dir\file.name"
         # Relative path
         assert filesystem.get_unique_filename(r"DIR\file.name").lower() == r"dir\file.name"
 
-    def test_existing_file(self):
+    def test_existing_file(self, fake_fs):
         test_file = r"C:\dir\file.name"
         max_obstruct = 11  # High enough for double digits
-        self.fs.create_file(test_file)
+        fake_fs.create_file(test_file)
         assert os.path.exists(test_file)
         # Create obstructions
         for n in range(1, max_obstruct):
             file_n = r"C:\dir\file." + str(n) + ".name"
-            self.fs.create_file(file_n)
+            fake_fs.create_file(file_n)
             assert os.path.exists(file_n)
         assert filesystem.get_unique_filename(test_file).lower() == r"c:\dir\file." + str(max_obstruct) + ".name"
 
-    def test_existing_file_without_extension(self):
+    def test_existing_file_without_extension(self, fake_fs):
         test_file = r"c:\some\filename"
         # Create obstructions
-        self.fs.create_file(test_file)
+        fake_fs.create_file(test_file)
         assert os.path.exists(test_file)
         assert filesystem.get_unique_filename(test_file).lower() == r"c:\some\filename.1"
 
 
-class TestCreateAllDirsWin(ffs.TestCase):
-    # Basic fake filesystem setup stanza
-    def setUp(self):
-        self.setUpPyfakefs()
-        self.fs.is_windows_fs = True
-        self.fs.path_separator = "\\"
-        self.fs.is_case_sensitive = False
-
-    @set_platform("win32")
-    def test_create_all_dirs(self):
-        self.directory = self.fs.create_dir(r"C:\Downloads")
+@pytest.mark.platform("win32")
+class TestCreateAllDirsWin:
+    def test_create_all_dirs(self, fake_fs):
+        self.directory = fake_fs.create_dir(r"C:\Downloads")
         # Also test for no crash when folder already exists
         for folder in (r"C:\Downloads", r"C:\Downloads\Show\Test", r"C:\Downloads\Show\Test2", r"C:\Downloads\Show"):
             assert filesystem.create_all_dirs(folder) == folder
@@ -825,111 +1342,114 @@ class PermissionCheckerHelper:
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="Non-Windows tests")
-class TestCreateAllDirs(ffs.TestCase, PermissionCheckerHelper):
-    def setUp(self):
-        self.setUpPyfakefs()
-        self.fs.path_separator = "/"
-        self.fs.is_case_sensitive = True
-
-    def test_basic_folder_creation(self):
-        self.fs.create_dir("/test_base")
+@pytest.mark.fake_fs(
+    {
+        "path_separator": "/",
+        "is_case_sensitive": True,
+    }
+)
+class TestCreateAllDirs(PermissionCheckerHelper):
+    def test_basic_folder_creation(self, fake_fs):
+        fake_fs.create_dir("/test_base")
         # Also test for no crash when folder already exists
         for folder in ("/test_base", "/test_base/show/season 1/episode 1", "/test_base/show"):
             assert filesystem.create_all_dirs(folder) == folder
             assert os.path.exists(folder)
 
-    @set_config({"umask": "0777"})
-    def test_permissions_777(self):
-        self._permissions_runner("/test_base777")
-        self._permissions_runner("/test_base777_nomask", apply_umask=False)
+    @pytest.mark.config({"permissions": "0777"})
+    def test_permissions_777(self, fake_fs):
+        self._permissions_runner(fake_fs, "/test_base777")
+        self._permissions_runner(fake_fs, "/test_base777_nomask", apply_permissions=False)
 
-    @set_config({"umask": "0770"})
-    def test_permissions_770(self):
-        self._permissions_runner("/test_base770")
-        self._permissions_runner("/test_base770_nomask", apply_umask=False)
+    @pytest.mark.config({"permissions": "0770"})
+    def test_permissions_770(self, fake_fs):
+        self._permissions_runner(fake_fs, "/test_base770")
+        self._permissions_runner(fake_fs, "/test_base770_nomask", apply_permissions=False)
 
-    @set_config({"umask": "0600"})
-    def test_permissions_600(self):
-        self._permissions_runner("/test_base600")
-        self._permissions_runner("/test_base600_nomask", apply_umask=False)
+    @pytest.mark.config({"permissions": "0600"})
+    def test_permissions_600(self, fake_fs):
+        with pytest.raises(OSError):  # pyfakefs checks fake permissions now...
+            self._permissions_runner(fake_fs, "/test_base600")
+        self._permissions_runner(fake_fs, "/test_base600_nomask", apply_permissions=False)
 
-    @set_config({"umask": "0700"})
-    def test_permissions_450(self):
+    @pytest.mark.config({"permissions": "0450"})
+    def test_permissions_450(self, fake_fs):
         with pytest.raises(OSError):
-            self._permissions_runner("/test_base450", perms_base="0450")
+            self._permissions_runner(fake_fs, "/test_base450", perms_base="0450")
 
-    def test_no_umask(self):
-        self._permissions_runner("/test_base_perm700", perms_base="0700")
-        self._permissions_runner("/test_base_perm750", perms_base="0750")
-        self._permissions_runner("/test_base_perm777", perms_base="0777")
-        self._permissions_runner("/test_base_perm600", perms_base="0600")
+    def test_no_permissions(self, fake_fs):
+        self._permissions_runner(fake_fs, "/test_base_perm700", perms_base="0700")
+        self._permissions_runner(fake_fs, "/test_base_perm750", perms_base="0750")
+        with pytest.raises(OSError):  # pyfakefs checks fake permissions now...
+            self._permissions_runner(fake_fs, "/test_base_perm600", perms_base="0600")
+        self._permissions_runner(fake_fs, "/test_base_perm777", perms_base="0777")
 
-    def _permissions_runner(self, test_base, perms_base="0700", apply_umask=True):
+    def _permissions_runner(
+        self,
+        fs,
+        test_base,
+        perms_base="0700",
+        apply_permissions=True,
+    ):
         # Create base directory and set the base permissions
         perms_base_int = int(perms_base, 8)
-        self.fs.create_dir(test_base, perms_base_int)
+        fs.create_dir(test_base, perms_base_int, apply_umask=False)
         assert os.path.exists(test_base) is True
         self.assert_dir_perms(test_base, perms_base_int)
 
         # Create directories with permissions
         new_dir = os.path.join(test_base, "se 1", "ep1")
-        filesystem.create_all_dirs(new_dir, apply_umask=apply_umask)
+        filesystem.create_all_dirs(new_dir, apply_permissions=apply_permissions)
 
         # If permissions needed to be set, verify the new folder has the
         # right permissions and verify the base didn't change
-        if apply_umask and cfg.umask():
-            perms_test_int = int(cfg.umask(), 8) | int("0700", 8)
+        if apply_permissions and cfg.permissions():
+            perms_test_int = int(cfg.permissions(), 8)
         else:
-            # Get the current umask, since os.mkdir masks that out
-            cur_umask = os.umask(0)
-            os.umask(cur_umask)
-            perms_test_int = int("0777", 8) & ~cur_umask
+            # Get the current permissions, since os.mkdir masks that out
+            perms_test_int = int("0777", 8) & ~sabnzbd.ORG_UMASK
         self.assert_dir_perms(new_dir, perms_test_int)
         self.assert_dir_perms(test_base, perms_base_int)
 
 
-class TestSetPermissionsWin(ffs.TestCase):
-    @set_platform("win32")
+@pytest.mark.platform("win32")
+class TestSetPermissionsWin:
     def test_win32(self):
         # Should not do or return anything on Windows
         assert filesystem.set_permissions(r"F:\who\cares", recursive=False) is None
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="Non-Windows tests")
-class TestSetPermissions(ffs.TestCase, PermissionCheckerHelper):
-    # Basic fake filesystem setup stanza
-    def setUp(self):
-        self.setUpPyfakefs()
-        self.fs.path_separator = "/"
-        self.fs.is_case_sensitive = True
-        self.fs.umask = int("0755", 8)  # rwxr-xr-x
-
-    def _runner(self, perms_test, perms_after):
+@pytest.mark.fake_fs(
+    {
+        "path_separator": "/",
+        "is_case_sensitive": True,
+        "umask": int("0022", 8),  # rwxr-xr-x
+    }
+)
+class TestSetPermissions(PermissionCheckerHelper):
+    def _runner(self, perms_before_test, fs):
         """
-        Generic test runner for permissions testing. The umask is set per test
-        via the relevant sab config option; the fileystem parameter in setUp().
+        Generic test runner for permissions testing. The permissions are set per test
+        via the relevant sab config option; the filesystem parameter in setUp().
         Note that the umask set in the environment before starting the program
-        also affects the results if sabnzbd.cfg.umask isn't set.
+        also affects the results if sabnzbd.cfg.permissions isn't set.
 
         Arguments:
             str perms_test: permissions for test objects, chmod style "0755".
-            str perms_after: expected permissions after completion of the test.
         """
-        perms_test = int(perms_test, 8)
-        if sabnzbd.cfg.umask():
-            perms_after = int(perms_after, 8)
+        # We expect the cfg.permissions to be applied, or the original to be kept if none are set
+        perms_before_test = int(perms_before_test, 8)
+        if sabnzbd.cfg.permissions():
+            perms_after_test = int(sabnzbd.cfg.permissions(), 8)
         else:
-            perms_after = int("0777", 8) & (sabnzbd.ORG_UMASK ^ int("0777", 8))
+            perms_after_test = perms_before_test
 
         # Setup and verify fake dir
         test_dir = "/test"
-        try:
-            self.fs.create_dir(test_dir, perms_test)
-        except PermissionError:
-            ffs.set_uid(0)
-            self.fs.create_dir(test_dir, perms_test)
+        fs.create_dir(test_dir, perms_before_test, apply_umask=False)
         assert os.path.exists(test_dir) is True
-        self.assert_dir_perms(test_dir, perms_test)
+        self.assert_dir_perms(test_dir, perms_before_test)
 
         # Setup and verify fake files
         for file in (
@@ -939,17 +1459,32 @@ class TestSetPermissions(ffs.TestCase, PermissionCheckerHelper):
             "another/sub/dir/WithSome.File",
         ):
             file = os.path.join(test_dir, file)
-            try:
-                self.fs.create_file(file, perms_test)
-            except PermissionError:
+            basefolder = os.path.dirname(file)
+
+            # Create the folder, so it has the expected permissions
+            if not os.path.exists(basefolder):
                 try:
-                    ffs.set_uid(0)
-                    self.fs.create_file(file, perms_test)
-                except Exception:
-                    # Skip creating files, if not even using root gets the job done.
-                    break
+                    fs.create_dir(basefolder, perms_before_test, apply_umask=False)
+                except PermissionError:
+                    set_uid(0)
+                    fs.create_file(file, perms_before_test, apply_umask=False)
+            assert os.path.exists(basefolder) is True
+            self.assert_dir_perms(basefolder, perms_before_test)
+
+            # Add a random one of the forbidden bits
+            file_perms_before_test = perms_before_test | choice(
+                (stat.S_ISUID, stat.S_ISGID, stat.S_IXUSR, stat.S_IXGRP, stat.S_IXOTH)
+            )
+
+            # Then, create the file
+            try:
+                fs.create_file(file, file_perms_before_test, apply_umask=False)
+            except PermissionError:
+                set_uid(0)
+                fs.create_file(file, file_perms_before_test, apply_umask=False)
+
             assert os.path.exists(file) is True
-            assert stat.filemode(os.stat(file).st_mode)[1:] == stat.filemode(perms_test)[1:]
+            assert stat.filemode(os.stat(file).st_mode)[1:] == stat.filemode(file_perms_before_test)[1:]
 
         # Set permissions, recursive by default
         filesystem.set_permissions(test_dir)
@@ -958,74 +1493,59 @@ class TestSetPermissions(ffs.TestCase, PermissionCheckerHelper):
         for root, dirs, files in os.walk(test_dir):
             for directory in [os.path.join(root, d) for d in dirs]:
                 # Permissions on directories should now match perms_after
-                self.assert_dir_perms(directory, perms_after)
+                self.assert_dir_perms(directory, perms_after_test)
             for file in [os.path.join(root, f) for f in files]:
                 # Files also shouldn't have any executable or special bits set
                 assert (
                     stat.filemode(os.stat(file).st_mode)[1:]
                     == stat.filemode(
-                        perms_after & ~(stat.S_ISUID | stat.S_ISGID | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                        perms_after_test & ~(stat.S_ISUID | stat.S_ISGID | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
                     )[1:]
                 )
 
         # Cleanup
-        ffs.set_uid(0)
-        self.fs.remove_object(test_dir)
+        set_uid(0)
+        fs.remove_object(test_dir)
         assert os.path.exists(test_dir) is False
-        ffs.set_uid(global_uid)
+        set_uid(global_uid)
 
-    @set_platform("linux")
-    def test_dir0777_empty_umask_setting(self):
+    @pytest.mark.platform("linux")
+    def test_empty_permissions_setting(self, fake_fs):
         # World writable directory
-        self._runner("0777", "0700")
+        self._runner("0777", fake_fs)
+        self._runner("0450", fake_fs)
 
-    @set_platform("linux")
-    def test_dir0450_empty_umask_setting(self):
-        # Insufficient access
-        self._runner("0450", "0700")
+    @pytest.mark.platform("linux")
+    @pytest.mark.config({"permissions": "0760"})
+    def test_dir0777_permissions0760_setting(self, fake_fs):
+        # World-writable directory, permissions 760
+        self._runner("0777", fake_fs)
 
-    @set_platform("linux")
-    def test_dir0000_empty_umask_setting(self):
-        # Weird directory permissions
-        self._runner("0000", "0700")
+    @pytest.mark.platform("linux")
+    @pytest.mark.config({"permissions": "0617"})
+    def test_dir0450_permissions0617_setting(self, fake_fs):
+        # Insufficient base access
+        self._runner("0450", fake_fs)
 
-    @set_platform("linux")
-    @set_config({"umask": "0760"})
-    def test_dir0777_umask0760_setting(self):
-        # World-writable directory, umask 760
-        self._runner("0777", "0760")
+    @pytest.mark.platform("linux")
+    @pytest.mark.config({"permissions": "2455"})
+    def test_dir0444_permissions2455_setting(self, fake_fs):
+        # Insufficient access, permissions with setgid (should be stripped)
+        self._runner("0444", fake_fs)
 
-    @set_platform("linux")
-    @set_config({"umask": "0617"})
-    def test_dir0450_umask0617_setting(self):
-        # Insufficient access, weird umask
-        self._runner("0450", "0717")
-
-    @set_platform("linux")
-    @set_config({"umask": "0000"})
-    def test_dir0405_umask0000_setting(self):
-        # Insufficient access on all fronts, weird umask
-        self._runner("0405", "0700")
-
-    @set_platform("linux")
-    @set_config({"umask": "2455"})
-    def test_dir0444_umask2455_setting(self):
-        # Insufficient access, weird umask with setgid
-        self._runner("0444", "2755")
-
-    @set_platform("linux")
-    @set_config({"umask": "4755"})
-    def test_dir1755_umask4755_setting(self):
-        # Sticky bit on directory, umask with setuid
-        self._runner("1755", "4755")
+    @pytest.mark.platform("linux")
+    @pytest.mark.config({"permissions": "4755"})
+    def test_dir1755_permissions4755_setting(self, fake_fs):
+        # Sticky bit on directory, permissions with setuid (should be stripped)
+        self._runner("1755", fake_fs)
 
 
 class TestRenamer:
     # test filesystem.renamer() for different scenario's
-    def test_renamer(self):
+    def test_renamer(self, fake_fs):
         # First of all, create a working directory (with a random name)
-        dirname = os.path.join(SAB_DATA_DIR, "testdir" + str(random.randint(10000, 99999)))
-        os.mkdir(dirname)
+        dirname = os.path.join(SAB_DATA_DIR, "testdir" + str(randint(10000, 99999)))
+        fake_fs.create_dir(dirname)
 
         # base case: rename file within directory
         filename = os.path.join(dirname, "myfile.txt")
@@ -1038,7 +1558,7 @@ class TestRenamer:
         # standard behaviour: renaming (moving) into an exiting other directory *is* allowed
         filename = os.path.join(dirname, "myfile.txt")
         Path(filename).touch()  # create file
-        sameleveldirname = os.path.join(SAB_DATA_DIR, "othertestdir" + str(random.randint(10000, 99999)))
+        sameleveldirname = os.path.join(SAB_DATA_DIR, "othertestdir" + str(randint(10000, 99999)))
         os.mkdir(sameleveldirname)
         newfilename = os.path.join(sameleveldirname, "newfile.txt")
         assert newfilename == filesystem.renamer(filename, newfilename)
@@ -1052,7 +1572,7 @@ class TestRenamer:
         try:
             # Should fail
             filesystem.renamer(filename, newfilename)
-        except:
+        except Exception:
             pass
         assert os.path.isfile(filename)
         assert not os.path.isfile(newfilename)
@@ -1062,7 +1582,7 @@ class TestRenamer:
         newfilename = os.path.join(dirname, "newsubdir", "newfile.txt")
         try:
             filesystem.renamer(filename, newfilename, create_local_directories=True)
-        except:
+        except Exception:
             pass
         assert not os.path.isfile(filename)
         assert os.path.isfile(newfilename)
@@ -1072,7 +1592,7 @@ class TestRenamer:
         newfilename = os.path.join(dirname, "newsubdir", "deepersubdir", "newfile.txt")
         try:
             filesystem.renamer(filename, newfilename, create_local_directories=True)
-        except:
+        except Exception:
             pass
         assert not os.path.isfile(filename)
         assert os.path.isfile(newfilename)
@@ -1082,13 +1602,114 @@ class TestRenamer:
         newfilename = os.path.join(dirname, "..", "newsubdir", "newfile.txt")
         try:
             filesystem.renamer(filename, newfilename, create_local_directories=True)
-        except:
+        except Exception:
             pass
         assert os.path.isfile(filename)
         assert not os.path.isfile(newfilename)
 
+        # ... renaming into the admin folder is not allowed either
+        admin_dir = os.path.join(dirname, JOB_ADMIN)
+        os.mkdir(admin_dir)
+        Path(filename).touch()
+        newfilename = os.path.join(admin_dir, "__verified__")
+        try:
+            filesystem.renamer(filename, newfilename, create_local_directories=True)
+        except Exception:
+            pass
+        assert os.path.isfile(filename)
+        assert not os.path.isfile(newfilename)
+
+        # ... nor is naming the admin folder itself: a move into an existing directory
+        # keeps the old basename, so this would end up inside the admin folder as well
+        Path(filename).touch()
+        try:
+            filesystem.renamer(filename, admin_dir, create_local_directories=True)
+        except Exception:
+            pass
+        assert os.path.isfile(filename)
+        assert not os.listdir(admin_dir)
+
+        # ... and not under another name that resolves to it, such as a link. On Windows
+        # an NTFS 8.3 alias ("__ADMI~1") reaches the admin folder the very same way.
+        linkname = os.path.join(dirname, "notadmin")
+        os.symlink(admin_dir, linkname)
+        Path(filename).touch()
+        try:
+            filesystem.renamer(filename, os.path.join(linkname, "__verified__"), create_local_directories=True)
+        except Exception:
+            pass
+        assert os.path.isfile(filename)
+        assert not os.listdir(admin_dir)
+        os.remove(linkname)
+
         # Cleanup working directory
         shutil.rmtree(dirname)
+
+    @pytest.mark.skipif(
+        sys.platform.startswith("win"), reason="Windows collapses '..' before the filesystem resolves links"
+    )
+    def test_link_cannot_redirect_rename(self, tmp_path):
+        """The filesystem resolves a link before it handles "..", so "pivot/.." lands one
+        level higher than normalizing the path on its own suggests"""
+        base = str(tmp_path)
+        dirname = os.path.join(base, "job")
+        os.mkdir(dirname)
+        os.symlink(".", os.path.join(dirname, "pivot"))
+
+        filename = os.path.join(dirname, "myfile.txt")
+        Path(filename).touch()
+        escaped = os.path.join(base, "escaped.bin")
+        with pytest.raises(OSError):
+            filesystem.renamer(
+                filename, os.path.join(dirname, "pivot", "..", "escaped.bin"), create_local_directories=True
+            )
+        assert os.path.isfile(filename)
+        assert not os.path.exists(escaped)
+
+        # A link that leaves the directory outright is no stepping stone either
+        os.symlink(base, os.path.join(dirname, "outside"))
+        with pytest.raises(OSError):
+            filesystem.renamer(filename, os.path.join(dirname, "outside", "escaped.bin"), create_local_directories=True)
+        assert os.path.isfile(filename)
+        assert not os.path.exists(escaped)
+
+
+class TestRestrictedUnpickler:
+    def test_round_trip(self, tmp_path):
+        data = {"a": 1, "s": {1, 2}, "when": datetime.datetime(2024, 1, 1), "t": time.gmtime(0), "st": os.stat(".")}
+        filesystem.save_data(data, "d", str(tmp_path))
+        assert filesystem.load_data("d", str(tmp_path), remove=False) == data
+
+    def test_rejects_code_execution_gadget(self):
+        class Evil:
+            def __reduce__(self):
+                return (os.system, ("echo pwned",))
+
+        with pytest.raises(pickle.UnpicklingError):
+            filesystem.RestrictedUnpickler(io.BytesIO(pickle.dumps(Evil()))).load()
+
+    def test_rejects_non_allowlisted_sabnzbd_class(self):
+        # kronos.ForkedScheduler has a __del__ that runs os.kill; referenced by name, rejected pre-import
+        def named_global(module, name):
+            return (
+                b"\x80\x04\x8c"
+                + bytes([len(module)])
+                + module.encode()
+                + b"\x8c"
+                + bytes([len(name)])
+                + name.encode()
+                + b"\x93."
+            )
+
+        with pytest.raises(pickle.UnpicklingError):
+            filesystem.RestrictedUnpickler(io.BytesIO(named_global("sabnzbd.utils.kronos", "ForkedScheduler"))).load()
+
+    def test_loads_legacy_3_0_rss_pickle(self):
+        path = os.path.join(SAB_DATA_DIR, "test_3_0_0_data_format")
+        data = filesystem.load_data("rss_data.sab", path, remove=False)
+        assert isinstance(data, dict) and data
+        feed_jobs = next(iter(data.values()))
+        assert isinstance(feed_jobs, dict) and feed_jobs
 
 
 class TestUnwantedExtensions:
@@ -1128,12 +1749,12 @@ class TestUnwantedExtensions:
         ([], False),
     ]
 
-    @set_config({"unwanted_extensions_mode": 0, "unwanted_extensions": test_extensions})
+    @pytest.mark.config({"unwanted_extensions_mode": 0, "unwanted_extensions": test_extensions})
     def test_has_unwanted_extension_blacklist_mode(self):
         for filename, result in self.test_params:
             assert filesystem.has_unwanted_extension(filename) is result
 
-    @set_config({"unwanted_extensions_mode": 1, "unwanted_extensions": test_extensions})
+    @pytest.mark.config({"unwanted_extensions_mode": 1, "unwanted_extensions": test_extensions})
     def test_has_unwanted_extension_whitelist_mode(self):
         for filename, result in self.test_params:
             if filesystem.get_ext(filename):
@@ -1142,12 +1763,12 @@ class TestUnwantedExtensions:
                 # missing extension is never considered unwanted
                 assert filesystem.has_unwanted_extension(filename) is False
 
-    @set_config({"unwanted_extensions_mode": 0, "unwanted_extensions": ""})
+    @pytest.mark.config({"unwanted_extensions_mode": 0, "unwanted_extensions": ""})
     def test_has_unwanted_extension_empty_blacklist(self):
         for filename, result in self.test_params:
             assert filesystem.has_unwanted_extension(filename) is False
 
-    @set_config({"unwanted_extensions_mode": 1, "unwanted_extensions": ""})
+    @pytest.mark.config({"unwanted_extensions_mode": 1, "unwanted_extensions": ""})
     def test_has_unwanted_extension_empty_whitelist(self):
         for filename, result in self.test_params:
             if filesystem.get_ext(filename):
@@ -1155,3 +1776,117 @@ class TestUnwantedExtensions:
             else:
                 # missing extension is never considered unwanted
                 assert filesystem.has_unwanted_extension(filename) is False
+
+
+class TestOtherFileSystemFunctions:
+    def test_directory_is_writable(self):
+        # very basic test of directory_is_writable()
+        # let's test on the tempdir provided by the OS:
+        assert filesystem.directory_is_writable(tempfile.gettempdir())
+
+    def test_filesystem_capabilities(self):
+        # test the filesystem is capable of long and unicode filenames
+        # any modern filesystem (ext3, ext4, ntfs, modern FAT) should succeed
+        assert filesystem.check_filesystem_capabilities(tempfile.gettempdir())
+
+    def test_directory_is_writable_with_file_survives_lost_test_file(self, monkeypatch):
+        # Regression test: losing the temporary test file before cleanup (e.g. a
+        # concurrent writability check removed it) must NOT be reported as "not
+        # writable". This used to surface as a false "is not writable at all.
+        # This blocks downloads." warning at startup.
+        test_dir = tempfile.gettempdir()
+        real_remove = os.remove
+        leftover = os.path.join(test_dir, "sab_test.txt")
+
+        def raise_enoent(path):
+            raise FileNotFoundError("simulated race: test file already removed")
+
+        monkeypatch.setattr(os, "remove", raise_enoent)
+        try:
+            assert filesystem.directory_is_writable_with_file(test_dir, "sab_test.txt") is True
+        finally:
+            # os.remove was patched out, so the test file was left behind
+            if os.path.exists(leftover):
+                real_remove(leftover)
+
+    def test_directory_is_writable_with_file_reports_write_failure(self, monkeypatch):
+        # A genuine failure to create/write the file must still return False
+        def raise_permission(*args, **kwargs):
+            raise PermissionError("simulated read-only filesystem")
+
+        monkeypatch.setattr("builtins.open", raise_permission)
+        assert filesystem.directory_is_writable_with_file(tempfile.gettempdir(), "sab_test.txt") is False
+
+    @pytest.mark.parametrize(
+        "name, ext_to_remove, output",
+        [
+            ("Test.nzb", (".nzb",), "Test"),
+            ("Test.nzb.nzb.nzb.nzb.nzb", (".nzb",), "Test"),
+            ("Test.not", (".nzb",), "Test.not"),
+            ("No.par2.Test.par2.nzb", (".nzb", ".par2"), "No.par2.Test"),
+        ],
+    )
+    def test_strip_extensions(self, name, ext_to_remove, output):
+        assert filesystem.strip_extensions(name, ext_to_remove) == output
+
+    @pytest.mark.parametrize(
+        "file_name, clean_file_name",
+        [
+            ("my_awesome_nzb_file.pAr2.nZb", "my_awesome_nzb_file"),
+            ("my_awesome_nzb_file.....pAr2.nZb", "my_awesome_nzb_file"),
+            ("my_awesome_nzb_file....par2..", "my_awesome_nzb_file"),
+            (" my_awesome_nzb_file  .pAr.nZb", "my_awesome_nzb_file"),
+            ("with.extension.and.period.par2.", "with.extension.and.period"),
+            ("nothing.in.here", "nothing.in.here"),
+            ("  just.space  ", "just.space"),
+            ("http://test.par2  ", "http___test"),
+            ("http://../../tmp", "http___.._.._tmp"),
+        ],
+    )
+    def test_create_work_name(self, file_name, clean_file_name):
+        # Only test stuff specific for create_work_name
+        # The sanitizing is already tested in tests for sanitize_foldername
+        assert filesystem.create_work_name(file_name) == clean_file_name
+
+
+class TestOutOfSpace:
+    """A full filesystem and an exhausted quota are the same thing to a user, and both
+    are fixed by freeing space rather than by retrying the write."""
+
+    @staticmethod
+    def error(code, winerror=None):
+        err = OSError(code, "test")
+        if winerror is not None:
+            err.winerror = winerror
+        return err
+
+    def test_a_full_filesystem(self):
+        assert sabnzbd.filesystem.out_of_space(self.error(errno.ENOSPC)) is True
+
+    def test_an_exhausted_quota(self):
+        assert sabnzbd.filesystem.out_of_space(self.error(errno.EDQUOT)) is True
+
+    @pytest.mark.parametrize("code", [errno.EACCES, errno.ENOENT, errno.EIO, errno.EROFS])
+    def test_other_errors_are_not_out_of_space(self, code):
+        """These need a person, not more free space, so they must not be reported as a
+        full disk"""
+        assert sabnzbd.filesystem.out_of_space(self.error(code)) is False
+
+    @pytest.mark.parametrize("winerror", [39, 112, 1295])
+    def test_the_windows_codes(self, winerror):
+        """Windows says it several ways and only some map onto an errno"""
+        original = sabnzbd.WINDOWS
+        sabnzbd.WINDOWS = True
+        try:
+            assert sabnzbd.filesystem.out_of_space(self.error(errno.EINVAL, winerror)) is True
+        finally:
+            sabnzbd.WINDOWS = original
+
+    def test_an_unrelated_windows_code(self):
+        original = sabnzbd.WINDOWS
+        sabnzbd.WINDOWS = True
+        try:
+            # 5 is ERROR_ACCESS_DENIED
+            assert sabnzbd.filesystem.out_of_space(self.error(errno.EINVAL, 5)) is False
+        finally:
+            sabnzbd.WINDOWS = original

@@ -1,0 +1,100 @@
+#!/usr/bin/python3 -OO
+# Copyright 2008-2026 by The SABnzbd-Team (sabnzbd.org)
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+
+import logging
+import os
+import platform
+import re
+import sys
+
+# Constants
+VERSION_FILE = "sabnzbd/version.py"
+APPDATA_FILE = "linux/org.sabnzbd.sabnzbd.appdata.xml"
+
+# To draft a release or not to draft a release?
+ON_GITHUB_ACTIONS = os.environ.get("CI", False)
+RELEASE_THIS = "refs/tags/" in os.environ.get("GITHUB_REF", "")
+
+# Import version.py without the sabnzbd overhead
+with open(VERSION_FILE) as version_file:
+    exec(version_file.read())
+RELEASE_VERSION = __version__
+
+# Parse the version info for Windows file properties information
+version_regexed = re.search(r"(\d+)\.(\d+)\.(\d+)([a-zA-Z]*)(\d*)", RELEASE_VERSION)
+RELEASE_VERSION_TUPLE = (int(version_regexed.group(1)), int(version_regexed.group(2)), int(version_regexed.group(3)), 0)
+RELEASE_VERSION_BASE = f"{RELEASE_VERSION_TUPLE[0]}.{RELEASE_VERSION_TUPLE[1]}.{RELEASE_VERSION_TUPLE[2]}"
+
+# Pre-releases carry an alpha suffix (e.g. 5.1.0Beta1); stable releases don't (e.g. 5.1.0 or 5.1.10)
+PRERELEASE = bool(version_regexed.group(4))
+
+# Define release name
+RELEASE_NAME = "SABnzbd-%s" % RELEASE_VERSION
+RELEASE_TITLE = "SABnzbd %s" % RELEASE_VERSION
+RELEASE_SRC = RELEASE_NAME + "-src.tar.gz"
+RELEASE_WIN_BIN_X64 = RELEASE_NAME + "-win64-bin.zip"
+RELEASE_WIN_BIN_ARM64 = RELEASE_NAME + "-win-arm64-bin.zip"
+RELEASE_WIN_INSTALLER = RELEASE_NAME + "-win-setup.exe"
+RELEASE_MACOS = RELEASE_NAME + "-macos.dmg"
+RELEASE_README = "README.mkd"
+
+# Detect architecture
+RELEASE_WIN_BIN = RELEASE_WIN_BIN_X64
+if platform.machine() == "ARM64":
+    RELEASE_WIN_BIN = RELEASE_WIN_BIN_ARM64
+
+# Used in package.py and SABnzbd.spec
+EXTRA_FILES = [
+    RELEASE_README,
+    "README.html",
+    "LICENSE.txt",
+    "GPL2.txt",
+    "GPL3.txt",
+    "COPYRIGHT.txt",
+]
+EXTRA_FOLDERS = [
+    "scripts/",
+    "licenses/",
+    "locale/",
+    "email/",
+    "interfaces/Glitter/",
+    "interfaces/wizard/",
+    "interfaces/Config/",
+    "icons/",
+]
+
+
+def pe_has_authenticode_signature(pe_file: str) -> bool:
+    """Check if a PE file (.exe) has an embedded Authenticode signature by
+    inspecting the certificate table in the optional header data directory."""
+    # Imported here as tools/extract_pot.py execs this file without
+    # the build dependencies to get the RELEASE_VERSION_BASE
+    import pefile
+
+    pe = pefile.PE(pe_file, fast_load=True)
+    security = pe.OPTIONAL_HEADER.DATA_DIRECTORY[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_SECURITY"]]
+    return security.VirtualAddress != 0 and security.Size != 0
+
+
+def setup_logging():
+    """Log to stdout, including the function the message came from.
+    Debug messages are shown when GitHub Actions debug logging is enabled."""
+    logging.basicConfig(
+        level=logging.DEBUG if os.environ.get("RUNNER_DEBUG") == "1" else logging.INFO,
+        stream=sys.stdout,
+        format="%(asctime)s::%(levelname)s::[%(funcName)s:%(lineno)d] %(message)s",
+    )

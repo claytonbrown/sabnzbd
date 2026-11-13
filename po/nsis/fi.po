@@ -1,16 +1,15 @@
 # SABnzbd Translation Template file NSIS
-# Copyright 2011-2021 The SABnzbd-Team
-#   team@sabnzbd.org
+# Copyright 2007-2026 by The SABnzbd-Team (sabnzbd.org)
 # 
 # Translators:
-# Safihre <safihre@sabnzbd.org>, 2020
+# Safihre <safihre@sabnzbd.org>, 2025
 # 
 msgid ""
 msgstr ""
-"Project-Id-Version: SABnzbd-develop\n"
+"Project-Id-Version: SABnzbd-5.2.0\n"
 "PO-Revision-Date: 2020-06-27 15:56+0000\n"
-"Last-Translator: Safihre <safihre@sabnzbd.org>, 2020\n"
-"Language-Team: Finnish (https://www.transifex.com/sabnzbd/teams/111101/fi/)\n"
+"Last-Translator: Safihre <safihre@sabnzbd.org>, 2025\n"
+"Language-Team: Finnish (https://app.transifex.com/sabnzbd/teams/111101/fi/)\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
@@ -22,31 +21,31 @@ msgid "Show Release Notes"
 msgstr "Näytä julkaisutiedot"
 
 #: builder/win/NSIS_Installer.nsi
+msgid "Run SABnzbd"
+msgstr "Käynnistä SABnzbd"
+
+#: builder/win/NSIS_Installer.nsi
 msgid "Support the project, Donate!"
 msgstr "Tue projektia, lahjoita!"
 
 #: builder/win/NSIS_Installer.nsi
-msgid "Please close \"SABnzbd.exe\" first"
-msgstr "Ole hyvä ja sulje \"SABnzbd.exe\" ensin"
+msgid "SABnzbd only supports 64-bit Windows."
+msgstr "SABnzbd tukee vain 64-bittistä Windowsia."
+
+#: builder/win/NSIS_Installer.nsi
+msgid "SABnzbd only supports Windows 8.1 and above."
+msgstr "SABnzbd tukee vain Windows 8.1:tä ja uudempia."
 
 #: builder/win/NSIS_Installer.nsi
 msgid ""
-"The SABnzbd Windows Service changed in SABnzbd 3.0.0. \\nYou will need to "
-"reinstall the SABnzbd service. \\n\\nClick `OK` to remove the existing "
-"services or `Cancel` to cancel this upgrade."
+"An ARM version of SABnzbd is available on our Downloads page. This installer"
+" only contains the regular version.\\nPress OK to continue or Cancel to "
+"exit."
 msgstr ""
 
 #: builder/win/NSIS_Installer.nsi
-msgid ""
-"The installer only supports 64-bit Windows, use the standalone version to "
-"run on 32-bit Windows."
-msgstr ""
-
-#: builder/win/NSIS_Installer.nsi
-msgid ""
-"The installer only supports Windows 8.1 and above, use the standalone legacy"
-" version to run on older Windows version."
-msgstr ""
+msgid "Shutting down SABnzbd"
+msgstr "Sammutetaan SABnzbd"
 
 #: builder/win/NSIS_Installer.nsi
 msgid "This will uninstall SABnzbd from your system"
@@ -71,15 +70,3 @@ msgstr "Poista sovellus"
 #: builder/win/NSIS_Installer.nsi
 msgid "Delete Settings"
 msgstr "Poista asetukset"
-
-#: builder/win/NSIS_Installer.nsi
-msgid ""
-"You cannot overwrite an existing installation. \\n\\nClick `OK` to remove "
-"the previous version or `Cancel` to cancel this upgrade."
-msgstr ""
-"Et voi asentaa tätä vanhan asennuksen päälle. \\n\\nPaina `OK` poistaaksesi "
-"edellisen version tai paina `Peruuta` peruuttaaksesi tämän päivityksen."
-
-#: builder/win/NSIS_Installer.nsi
-msgid "Your settings and data will be preserved."
-msgstr "Asetuksiasi ja tietojasi ei poisteta."

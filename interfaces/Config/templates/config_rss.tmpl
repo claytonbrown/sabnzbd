@@ -1,91 +1,58 @@
 <!--#set global $pane="RSS"#-->
-<!--#set global $help_uri="configuration/3.5/rss"#-->
+<!--#set global $help_uri = $confighelpuri + "rss"#-->
 <!--#include $webdir + "/_inc_header_uc.tmpl"#-->
 <!--#import html#-->
 <div class="colmask">
     <!--#if not $active_feed#-->
-    <div class="section">
-        <div class="padTable">
-            <a class="main-helplink" href="$helpuri$help_uri" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a>
-            <p>$T('explain-RSS')</p>
-            <form action="add_rss_feed" method="post" autocomplete="off">
-                <input type="hidden" name="apikey" value="$apikey" />
-                <table class="catTable addRssTable">
-                    <tr>
-                        <th>&nbsp;</th>
-                        <th>$T('name')</th>
-                        <th>$T('feed') URLs</th>
-                        <th>&nbsp;</th>
-                    </tr>
-                    <tr class="even">
-                        <td>
-                            <input type="checkbox" name="enable" value="1" checked />
-                        </td>
-                        <td class="new-feed-title">
-                            <input type="text" name="feed" value="$feed" />
-                        </td>
-                        <td class="new-feed-url">
-                            <input type="text" name="uri" placeholder="$T('addMultipleFeeds')" />
-                        </td>
-                        <td class="nowrap">
-                            <button type="submit" class="btn btn-default Save"><span class="glyphicon glyphicon-plus"></span> $T('button-add')</button>
-                        </td>
-                    </tr>
-                </table>
-            </form>
-        </div>
+    <div class="padding alt section">
+        <button type="button" class="btn btn-default" id="addFeedButton" data-name="$feed"><span class="glyphicon glyphicon-plus"></span> $T('button-addFeed')</button>
+        <!--#if $rss#-->
+        <form action="$url('config/rss/rss_now')" method="post" class="pull-right">
+            <button type="submit" class="btn btn-default readAll"><span class="glyphicon glyphicon-sort"></span> $T('button-rssNow')</button>
+        </form>
+        <!--#end if#-->
     </div>
-    <!--#if $rss#-->
+    <!--#if not $rss#-->
     <div class="section">
-        <div class="padTable">
-            <form action="save_rss_feed" method="post" autocomplete="off">
-                <input type="hidden" name="apikey" value="$apikey" />
-                <table id="subscriptions">
-                    <tbody>
-                        <!--#set $feeds = sorted($rss.keys(), key=lambda x: x.lower())#-->
-                        <!--#set $odd = False#-->
-                        <!--#for $feed_item in $feeds#-->
-                            <!--#set $odd = not $odd#-->
-                            <!--#set $feed_item_html = html.escape($feed_item)#-->
-                            <tr class="data-row <!--#if $odd then " alt " else " "#-->">
-                                <td class="chk">
-                                    <input type="checkbox" class="toggleFeedCheckbox" name="enable" value="1" <!--#if int($rss[$feed_item]['enable']) !=0 then 'checked="checked"' else ""#--> rel="$feed_item_html" />
-                                </td>
-                                <td class="title">
-                                    <a href="?feed=$rss[$feed_item]['link']" class="subscription-title path feed <!--#if int($rss[$feed_item]['enable']) != 0 then 'feed_enabled' else 'feed_disabled'#-->">
-                                         $feed_item
-                                    </a>
-                                </td>
-                                <td class="controls">
-                                    <button type="button" class="btn btn-default testFeed" rel="$feed_item_html"><span class="glyphicon glyphicon-sort"></span> $T('button-preFeed')</button>
-                                    <input type="hidden" name="uri" value="$rss[$feed_item]['uris']" />
-                                    <button type="button" class="btn btn-default editFeed" rel="$feed_item_html"><span class="glyphicon glyphicon-pencil"></span> $T('rss-edit')</button>
-                                    <button type="button" class="btn btn-default delFeed" rel="$feed_item_html"><span class="glyphicon glyphicon-trash"></span></button>
-                                </td>
-                            </tr>
-                            <!--#for $uri_index, $uri in enumerate($rss[$feed_item]['uri'])#-->
-                                <tr class="feed-row <!--#if $odd then " alt " else " "#-->">
-                                    <td><div class="favicon" style="background-image: url(//$rss[$feed_item]['baselink'][$uri_index]/favicon.ico);" data-domain="$rss[$feed_item]['baselink'][$uri_index]"></div></td>
-                                    <td colspan="2"><div>$uri</div></td>
-                                </tr>
-                            <!--#end for#-->
-                        <!--#end for#-->
-                    </tbody>
-                </table>
-            </form>
-            <!--#if $feeds#-->
-            <br/>
-            <form action="rss_now" method="post" autocomplete="off">
-                <input type="hidden" name="apikey" value="$apikey" />
-                <button type="submit" class="btn btn-default readAll"><span class="glyphicon glyphicon-sort"></span> $T('button-rssNow')</button>
-            </form>
-            <!--#end if#-->
-        </div>
+        <div class="padding">$T('rss-noFeeds')</div>
     </div>
     <!--#end if#-->
+    <!--#for $cur, $feed_item in enumerate(sorted($rss.keys(), key=lambda x: x.lower()))#-->
+    <!--#set $feed_item_html = html.escape($feed_item)#-->
+    <!--#set $feed_enabled = int($rss[$feed_item]['enable']) != 0#-->
+    <div class="section rss-feed <!--#if not $feed_enabled then 'server-disabled' else ''#-->">
+        <div class="col2 <!--#if not $feed_enabled then 'server-disabled' else ''#-->">
+            <h3 title="$feed_item_html">$feed_item_html <a href="$help_uri" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a></h3>
+            <table>
+                <tr>
+                    <td><input type="checkbox" class="toggleFeedCheckbox" id="feed_enable_$cur" rel="$feed_item_html" <!--#if $feed_enabled then 'checked="checked"' else ''#--> /></td>
+                    <td><label for="feed_enable_$cur">$T('enabled')</label></td>
+                </tr>
+            </table>
+            <button type="button" class="btn btn-default editFeed" rel="$feed_item_html" data-enable="$int($feed_enabled)" data-fetch-duplicates="$int($rss[$feed_item]['fetch_duplicates'])"><span class="glyphicon glyphicon-pencil"></span> $T('rss-edit')</button>
+            <!--#for $uri in $rss[$feed_item]['uri']#-->
+            <input type="hidden" class="feedUri" value="$uri" />
+            <!--#end for#-->
+            <a href="?feed=$rss[$feed_item]['link']" class="btn btn-default"><span class="glyphicon glyphicon-filter"></span> $T('rss-filters')</a>
+        </div>
+        <div class="col1 padding">
+            <ul class="feed-uris">
+                <!--#for $uri_index, $uri in enumerate($rss[$feed_item]['uri'])#-->
+                <li><div class="favicon" data-domain="$rss[$feed_item]['baselink'][$uri_index]" style="background-image: url(//$rss[$feed_item]['baselink'][$uri_index]/favicon.ico);"></div> $uri</li>
+                <!--#end for#-->
+            </ul>
+            <p class="feed-stats">
+                <span><strong>$rss[$feed_item]['count_matched']</strong> $T('rss-matched')</span>
+                <span><strong>$rss[$feed_item]['count_unmatched']</strong> $T('rss-notMatched')</span>
+                <span><strong>$rss[$feed_item]['count_downloaded']</strong> $T('rss-done')</span>
+            </p>
+
+            <button type="button" class="btn btn-default testFeed" rel="$feed_item_html"><span class="glyphicon glyphicon-sort"></span> $T('button-preFeed')</button>
+        </div>
+    </div>
+    <!--#end for#-->
     <div class="section">
-        <form action="save_rss_rate" method="post" autocomplete="off">
-            <input type="hidden" name="apikey" value="$apikey" />
+        <form action="$url('config/rss/save_rss_rate')" method="post" autocomplete="off">
             <div class="col1">
                 <fieldset>
                     <div class="field-pair">
@@ -102,24 +69,23 @@
     </div>
     <!--#end if#-->
     <!--#if $active_feed#-->
-    <!--#set $feed = $active_feed#-->
+    <!--#set $feed = html.unescape($active_feed)#-->
     <div class="section rss-section">
         <div class="padTable">
-            <a class="main-helplink" href="$helpuri$help_uri" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a>
+            <a class="main-helplink" href="$help_uri" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a>
             <h2 class="nomargin activeRSS">
-                <a href="${root}config/rss/">$T('cmenu-rss')</a> &raquo;
+                <a href="$url('config/rss')">$T('cmenu-rss')</a> &raquo;
                 $active_feed
             </h2>
-            <!--#if $error#-->
+            <!--#if $errors#-->
             <div class="alert alert-danger">
-                <span class="glyphicon glyphicon-exclamation-sign"></span>
-                <!--#echo html.escape($error)#-->
+                <!--#for $error in $errors#-->
+                <div><span class="glyphicon glyphicon-exclamation-sign"></span> $error</div>
+                <!--#end for#-->
             </div>
             <!--#end if#-->
-            <form action="upd_rss_feed" method="post">
-                <input type="hidden" name="apikey" value="$apikey" />
-                <input type="hidden" name="feed" value="$feed" />
-                <input type="hidden" name="uri" value="$rss[$feed]['uris']" />
+            <form action="$url('config/rss/upd_rss_feed')" method="post">
+                <input type="hidden" name="feed" value="$active_feed" />
                 <table class="catTable">
                     <thead>
                         <tr>
@@ -156,7 +122,8 @@
                                     <option value=">"> $T('rss-atleast')</option>
                                     <option value="<"> $T('rss-atmost')</option>
                                     <option value="F"> $T('rss-from')</option>
-                                    <option value="F"> $T('rss-from-show') ($T('rss-accept'))</option>
+                                    <option value="S"> $T('rss-from-show') ($T('rss-accept'))</option>
+                                    <option value="G"> $T('rss-age')</option>
                                 </select>
                             </td>
                             <td>
@@ -200,6 +167,7 @@
                             </td>
                             <!--#end if#-->
                             <td class="nowrap">
+
                                 <button type="submit" class="btn btn-default Save"><span class="glyphicon glyphicon-ok"></span> $T('button-save')</button>
                             </td>
                         </tr>
@@ -207,10 +175,9 @@
                 </table>
             </form>
             <!-- add new filter -->
-            <form action="upd_rss_filter" method="post">
-                <input type="hidden" name="apikey" value="$apikey" />
+            <form data-form="update-rss-filter" action="$url('config/rss/upd_rss_filter')" method="post">
                 <input type="hidden" name="index" value="$rss[$feed]['filtercount']" />
-                <input type="hidden" name="feed" value="$feed" />
+                <input type="hidden" name="feed" value="$active_feed" />
                 <table class="catTable">
                     <tbody>
                         <tr>
@@ -230,6 +197,7 @@
                                     <option value="<"> $T('rss-atmost')</option>
                                     <option value="F"> $T('rss-from')</option>
                                     <option value="S"> $T('rss-from-show') ($T('rss-accept'))</option>
+                                    <option value="G"> $T('rss-age')</option>
                                 </select>
                             </td>
                             <td>
@@ -283,10 +251,9 @@
             <!--#set $fnum = 0#-->
             <!--#for $filter in $rss[$feed].filters#-->
                 <!--#set $odd = not $odd#-->
-                <form action="upd_rss_filter" method="post" autocomplete="off">
-                    <input type="hidden" name="apikey" value="$apikey" />
+                <form data-form="update-rss-filter" action="$url('config/rss/upd_rss_filter')" method="post" autocomplete="off">
                     <input type="hidden" name="index" value="$fnum" />
-                    <input type="hidden" name="feed" value="$feed" />
+                    <input type="hidden" name="feed" value="$active_feed" />
                     <table class="catTable">
                         <tbody>
                             <tr class="<!--#if $odd then " alt " else " "#--> <!--#if $filter[3]!="A" and $filter[3]!="S" then 'disabled_options_rule' else ""#-->">
@@ -302,10 +269,11 @@
                                         <option value="M" <!--#if $filter[3]=="M" then 'selected="selected"' else ""#-->> $T('rss-must')</option>
                                         <option value="R" <!--#if $filter[3]=="R" then 'selected="selected"' else ""#-->> $T('rss-reject')</option>
                                         <option value="C" <!--#if $filter[3]=="C" then 'selected="selected"' else ""#-->> $T('rss-mustcat')</option>
-                                        <option value=">" <!--#if $filter[3]==">" then 'selected="selected"' else ""#-->> $T('rss-atleast')</option>
-                                        <option value="<" <!--#if $filter[3]=="<" then 'selected="selected"' else ""#-->> $T('rss-atmost')</option>
+                                        <option value=">" <!--#if $filter[3]=="&gt;" then 'selected="selected"' else ""#-->> $T('rss-atleast')</option>
+                                        <option value="<" <!--#if $filter[3]=="&lt;" then 'selected="selected"' else ""#-->> $T('rss-atmost')</option>
                                         <option value="F" <!--#if $filter[3]=="F" then 'selected="selected"' else ""#-->> $T('rss-from')</option>
                                         <option value="S" <!--#if $filter[3]=="S" then 'selected="selected"' else ""#-->> $T('rss-from-show') ($T('rss-accept'))</option>
+                                        <option value="G" <!--#if $filter[3]=="G" then 'selected="selected"' else ""#-->> $T('rss-age')</option>
                                     </select>
                                 </td>
                                 <td>
@@ -361,138 +329,53 @@
                 </form>
                 <!--#set $fnum = $fnum+1#-->
             <!--#end for#-->
-            <form action="download_rss_feed" method="post">
-                <input type="hidden" name="apikey" value="$apikey" />
-                <input type="hidden" name="feed" value="$feed" />
+            <form action="$url('config/rss/download_rss_feed')" method="post">
+                <input type="hidden" name="feed" value="$active_feed" />
                 <div class="padding">
-                    <button type="button" class="btn btn-default testFeed" rel="$feed"><span class="glyphicon glyphicon-sort"></span> $T('button-preFeed')</button>
+                    <button type="button" class="btn btn-default testFeed" rel="$active_feed"><span class="glyphicon glyphicon-sort"></span> $T('button-preFeed')</button>
                     <button type="submit" class="btn btn-default Save"><span class="glyphicon glyphicon-forward"></span> $T('button-forceFeed')</button>
                     <button type="button" class="btn btn-default cleanFeed"><span class="glyphicon glyphicon-trash"></span> $T('button-clear') $T('rss-done')</button>
-                    <!--#if $evalButton#-->
-                      <button type="button" class="btn btn-default evalFeed" rel="$feed"><span class="glyphicon glyphicon-ok-circle"></span> $T('button-evalFeed')</button>
-                    <!--#end if#-->
                 </div>
             </form>
         </div>
     </div>
-    <br/>
-    <div style="padding-left: 10px; border-bottom: 1px solid #DFDEDE;">
-        <ul class="tabs">
-            <li class="active"><a href="#rss-tab-matched" data-toggle="tab">$T('rss-matched') <span class="count"><!--#echo len($matched)#--></span></a></li>
-            <li><a href="#rss-tab-not-matched">$T('rss-notMatched') <span class="count"><!--#echo len($unmatched)#--></span></a></li>
-            <li><a href="#rss-tab-done">$T('rss-done') <span class="count"><!--#echo len($downloaded)#--></span></a></li>
-        </ul>
-    </div>
-    <div class="tab-content">
-        <div class="tab-pane fade in active padTable" id="rss-tab-matched">
-            <!--#if $matched#-->
-            <table class="catTable">
-                <thead>
-                    <tr>
-                        <th class="no-sort">$T('link-download')</th>
-                        <th>$T('rss-filter')</th>
-                        <th>$T('size')</th>
-                        <th width="60%">$T('sort-title')</th>
-                        <th>$T('category')</th>
-                        <th class="default-sort">$T('nzo-age')</th>
-                        <th>$T('source')</th>
-                    </tr>
-                </thead>
-                <!--#for $job in $matched#-->
-                    <tr class="infoTableSeperator">
-                        <td>
-                            <form action="download" method="get">
-                                <input type="hidden" value="$feed" name="feed" />
-                                <input type="hidden" name="apikey" value="$apikey" />
-                                <input type="hidden" name="url" value="$job['url']" />
-                                <input type="hidden" name="nzbname" value="$job['nzbname']" />
-                                <button type="submit" class="btn btn-default"><span class="glyphicon glyphicon-plus-sign"></span> $T('link-download')</button>
-                            </form>
-                        </td>
-                        <td>$job['rule'] $job['skip']</td>
-                        <td data-sort-value="$job['size']">$job['size_units']</td>
-                        <td>$job['title']</td>
-                        <td>$job['cat']</td>
-                        <td data-sort-value="$job['age_ms']">$job['age']</td>
-                        <td data-sort-value="$job['baselink']" title="$job['baselink']">
-                            <!--#if not $job['infourl']#-->
-                            <div class="favicon source-icon" style="background-image: url(//$job['baselink']/favicon.ico);" data-domain="$job['baselink']"></div>
-                            <!--#else#-->
-                            <a class="favicon source-icon" href="$job['infourl']" target="_blank" style="background-image: url(//$job['baselink']/favicon.ico);" data-domain="$job['baselink']"></a>
-                            <!--#end if#-->
-                        </td>
-                    </tr>
-                <!--#end for#-->
-            </table>
-            <!--#else#-->
-            $T('none')
-            <!--#end if#-->
-        </div>
-        <div class="tab-pane padTable" id="rss-tab-not-matched">
-            <!--#if $unmatched#-->
-            <table class="catTable">
-                <thead>
-                    <tr>
-                        <th class="no-sort">$T('link-download')</th>
-                        <th>$T('rss-filter')</th>
-                        <th>$T('size')</th>
-                        <th width="60%">$T('sort-title')</th>
-                        <th>$T('category')</th>
-                        <th class="default-sort">$T('nzo-age')</th>
-                        <th>$T('source')</th>
-                    </tr>
-                </thead>
-                <!--#for $job in $unmatched#-->
-                    <tr class="infoTableSeperator">
-                        <td>
-                            <form action="download" method="get">
-                                <input type="hidden" value="$feed" name="feed" />
-                                <input type="hidden" name="apikey" value="$apikey" />
-                                <input type="hidden" name="url" value="$job['url']" />
-                                <input type="hidden" name="nzbname" value="$job['nzbname']" />
-                                <button type="submit" class="btn btn-default"><span class="glyphicon glyphicon-plus-sign"></span> $T('link-download')</button>
-                            </form>
-                        </td>
-                        <td>$job['rule'] $job['skip']</td>
-                        <td data-sort-value="$job['size']">$job['size_units']</td>
-                        <td>$job['title']</td>
-                        <td>$job['cat']</td>
-                        <td data-sort-value="$job['age_ms']">$job['age']</td>
-                        <td data-sort-value="$job['baselink']" title="$job['baselink']">
-                            <!--#if not $job['infourl']#-->
-                            <div class="favicon source-icon" style="background-image: url(//$job['baselink']/favicon.ico);" data-domain="$job['baselink']"></div>
-                            <!--#else#-->
-                            <a class="favicon source-icon" href="$job['infourl']" target="_blank" style="background-image: url(//$job['baselink']/favicon.ico);" data-domain="$job['baselink']"></a>
-                            <!--#end if#-->
-                        </td>
-                    </tr>
-                <!--#end for#-->
-            </table>
-            <!--#else#-->
-                $T('none')
-            <!--#end if#-->
-        </div>
-        <div class="tab-pane padTable" id="rss-tab-done">
-            <!--#if $downloaded#-->
-            <form action="clean_rss_jobs" method="post">
-                <input type="hidden" value="$feed" name="feed" />
-                <input type="hidden" name="apikey" value="$apikey" />
+
+    <ul class="nav nav-tabs">
+        <li class="active"><a href="#rss-tab-matched" data-toggle="tab">$T('rss-matched') <span class="count"><!--#echo len($matched)#--></span></a></li>
+        <li><a href="#rss-tab-not-matched">$T('rss-notMatched') <span class="count"><!--#echo len($unmatched)#--></span></a></li>
+        <li><a href="#rss-tab-done">$T('rss-done') <span class="count"><!--#echo len($downloaded)#--></span></a></li>
+    </ul>
+    <div class="section">
+        <div class="tab-content">
+            <div class="tab-pane fade in active padTable" id="rss-tab-matched">
+                <!--#if $matched#-->
                 <table class="catTable">
                     <thead>
                         <tr>
-                            <th class="default-sort">$T('rss-added')</th>
+                            <th class="no-sort">$T('link-download')</th>
+                            <th>$T('rss-filter')</th>
                             <th>$T('size')</th>
                             <th width="60%">$T('sort-title')</th>
                             <th>$T('category')</th>
+                            <th class="default-sort">$T('nzo-age')</th>
                             <th>$T('source')</th>
                         </tr>
                     </thead>
-                    <!--#for $job in $downloaded#-->
+                    <!--#for $job in $matched#-->
                         <tr class="infoTableSeperator">
-                            <td data-sort-value="$job['time_downloaded_ms']">$job['time_downloaded']</td>
+                            <td>
+                                <form data-form="download-rss-job" action="$url('config/rss/download')" method="post">
+                                    <input type="hidden" value="$active_feed" name="feed" />
+                                    <input type="hidden" name="url" value="$job['url']" />
+                                    <input type="hidden" name="nzbname" value="$job['nzbname']" />
+                                    <button type="submit" class="btn btn-default"><span class="glyphicon glyphicon-plus-sign"></span> $T('link-download')</button>
+                                </form>
+                            </td>
+                            <td>$job['rule'] $job['skip']</td>
                             <td data-sort-value="$job['size']">$job['size_units']</td>
                             <td>$job['title']</td>
                             <td>$job['cat']</td>
+                            <td data-sort-value="$job['age_ms']">$job['age']</td>
                             <td data-sort-value="$job['baselink']" title="$job['baselink']">
                                 <!--#if not $job['infourl']#-->
                                 <div class="favicon source-icon" style="background-image: url(//$job['baselink']/favicon.ico);" data-domain="$job['baselink']"></div>
@@ -503,90 +386,226 @@
                         </tr>
                     <!--#end for#-->
                 </table>
-            </form>
-            <!--#else#-->
+                <!--#else#-->
                 $T('none')
+                <!--#end if#-->
+            </div>
+            <div class="tab-pane padTable" id="rss-tab-not-matched">
+                <!--#if $unmatched#-->
+                <table class="catTable">
+                    <thead>
+                        <tr>
+                            <th class="no-sort">$T('link-download')</th>
+                            <th>$T('rss-filter')</th>
+                            <th>$T('size')</th>
+                            <th width="60%">$T('sort-title')</th>
+                            <th>$T('category')</th>
+                            <th class="default-sort">$T('nzo-age')</th>
+                            <th>$T('source')</th>
+                        </tr>
+                    </thead>
+                    <!--#for $job in $unmatched#-->
+                        <tr class="infoTableSeperator">
+                            <td>
+                                <form data-form="download-rss-job" action="$url('config/rss/download')" method="post">
+                                    <input type="hidden" value="$active_feed" name="feed" />
+                                    <input type="hidden" name="url" value="$job['url']" />
+                                    <input type="hidden" name="nzbname" value="$job['nzbname']" />
+                                    <button type="submit" class="btn btn-default"><span class="glyphicon glyphicon-plus-sign"></span> $T('link-download')</button>
+                                </form>
+                            </td>
+                            <td>$job['rule'] $job['skip']</td>
+                            <td data-sort-value="$job['size']">$job['size_units']</td>
+                            <td>$job['title']</td>
+                            <td>$job['cat']</td>
+                            <td data-sort-value="$job['age_ms']">$job['age']</td>
+                            <td data-sort-value="$job['baselink']" title="$job['baselink']">
+                                <!--#if not $job['infourl']#-->
+                                <div class="favicon source-icon" style="background-image: url(//$job['baselink']/favicon.ico);" data-domain="$job['baselink']"></div>
+                                <!--#else#-->
+                                <a class="favicon source-icon" href="$job['infourl']" target="_blank" style="background-image: url(//$job['baselink']/favicon.ico);" data-domain="$job['baselink']"></a>
+                                <!--#end if#-->
+                            </td>
+                        </tr>
+                    <!--#end for#-->
+                </table>
+                <!--#else#-->
+                    $T('none')
+                <!--#end if#-->
+            </div>
+            <div class="tab-pane padTable" id="rss-tab-done">
+                <!--#if $downloaded#-->
+                <form action="$url('config/rss/clean_rss_jobs')" method="post">
+                    <input type="hidden" value="$active_feed" name="feed" />
+                    <table class="catTable">
+                        <thead>
+                            <tr>
+                                <th class="default-sort">$T('rss-added')</th>
+                                <th>$T('rss-filter')</th>
+                                <th>$T('size')</th>
+                                <th width="60%">$T('sort-title')</th>
+                                <th>$T('category')</th>
+                                <th>$T('nzo-age')</th>
+                                <th>$T('source')</th>
+                            </tr>
+                        </thead>
+                        <!--#for $job in $downloaded#-->
+                            <tr class="infoTableSeperator">
+                                <td data-sort-value="$job['time_downloaded_ms']">$job['time_downloaded']</td>
+                                <td>$job['rule'] $job['skip']</td>
+                                <td data-sort-value="$job['size']">$job['size_units']</td>
+                                <td>$job['title']</td>
+                                <td>$job['cat']</td>
+                                <td data-sort-value="$job['age_ms']">$job['age']</td>
+                                <td data-sort-value="$job['baselink']" title="$job['baselink']">
+                                    <!--#if not $job['infourl']#-->
+                                    <div class="favicon source-icon" style="background-image: url(//$job['baselink']/favicon.ico);" data-domain="$job['baselink']"></div>
+                                    <!--#else#-->
+                                    <a class="favicon source-icon" href="$job['infourl']" target="_blank" style="background-image: url(//$job['baselink']/favicon.ico);" data-domain="$job['baselink']"></a>
+                                    <!--#end if#-->
+                                </td>
+                            </tr>
+                        <!--#end for#-->
+                    </table>
+                </form>
+                <!--#else#-->
+                $T('none')
+                <!--#end if#-->
+            </div>
             <!--#end if#-->
         </div>
-        <!--#end if#-->
     </div>
 </div>
 <!-- /colmask -->
 
-<form method="post" action="save_rss_feed" class="modal fade" id="rss_edit_modal">
+<form method="post" action="$url('config/rss/save_rss_feed')" class="modal fade" id="rss_edit_modal" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="rss-edit-modal-title">
     <div class="modal-dialog">
         <div class="modal-content">
             <div class="modal-header">
-                <button type="button" class="close" data-dismiss="modal">&times;</button>
-                <h4 class="modal-title">$T('Edit') <span id="feed_edit_name_label"></span></h4>
+                <button type="button" class="close" data-dismiss="modal" aria-label="$T('close')"><span aria-hidden="true">&times;</span></button>
+                <h4 class="modal-title" id="rss-edit-modal-title"><span class="feed-edit-only">$T('Edit') <span id="feed_edit_name_label"></span></span><span class="feed-add-only">$T('button-addFeed')</span></h4>
             </div>
             <div class="modal-body">
                 <div class="form-group">
                     <label for="feed_edit_new_name">$T('name')</label>
-                    <input type="text" class="form-control" name="feed_new_name" id="feed_edit_new_name" placeholder="$T('name')" size="">
+                    <input type="text" class="form-control" name="feed_new_name" id="feed_edit_new_name" size="" required />
                 </div>
                 <div class="form-group">
-                    <label for="feed_edit_url">$T('feed') URLs</label>
-                    <input type="text" class="form-control" name="uri" id="feed_edit_url" placeholder="$T('feed') URLs" size="">
-                    <span class="help-block">$T('addMultipleFeeds')</span>
+                    <label>$T('feed') URLs</label>
+                    <div class="feed-urls" id="feed_edit_urls">
+                        <div class="input-group feed-url-row">
+                            <input type="url" class="form-control" name="uri" size="" placeholder="https://" required />
+                            <span class="input-group-btn"><button type="button" class="btn btn-default removeFeedUrl" title="$T('rss-removeUrl')"><span class="glyphicon glyphicon-minus"></span></button></span>
+                        </div>
+                        <button type="button" class="btn btn-default addFeedUrl"><span class="glyphicon glyphicon-plus"></span> $T('rss-addUrl')</button>
+                    </div>
+                    <span class="help-block">$T('explain-rss-urls')</span>
                 </div>
+                <div class="form-group">
+                    <label for="feed_edit_enable" class="form-control bar-button bar-button-left">
+                        <input type="checkbox" name="enable" value="1" id="feed_edit_enable" /> $T('enabled')
+                    </label>
+                    <div class="clearfix"></div>
+                    <span class="help-block">$T('explain-rss-enable')</span>
+                </div>
+                <!--#if $duplicate_detection#-->
+                <div class="form-group">
+                    <label for="feed_edit_fetch_duplicates" class="form-control bar-button bar-button-left">
+                        <input type="checkbox" name="fetch_duplicates" value="1" id="feed_edit_fetch_duplicates" /> $T('rss-fetchDuplicates')
+                    </label>
+                    <div class="clearfix"></div>
+                    <span class="help-block">$T('explain-rss-fetchDuplicates')</span>
+                </div>
+                <!--#end if#-->
+                <p class="feed-add-only help-block">$T('explain-rss-newFeed')</p>
                 <input type="hidden" name="feed" id="feed_edit_old_name" />
-                <input type="hidden" name="apikey" value="$apikey" />
             </div>
             <div class="modal-footer">
+                <button type="button" class="btn btn-default delFeed feed-edit-only pull-left"><span class="glyphicon glyphicon-trash"></span> $T('button-delFeed')</button>
                 <button type="button" class="btn btn-danger" data-dismiss="modal"><span class="glyphicon glyphicon-remove"></span> $T('cancel')</button>
-                <button type="submit" class="btn btn-default"><span class="glyphicon glyphicon-ok"></span> $T('rss-accept')</button>
+                <button type="submit" class="btn btn-default">
+                    <span class="feed-add-only"><span class="glyphicon glyphicon-plus"></span> $T('button-addFeed')</span>
+                    <span class="feed-edit-only"><span class="glyphicon glyphicon-ok"></span> $T('button-save')</span>
+                </button>
             </div>
         </div><!-- /.modal-content -->
     </div><!-- /.modal-dialog -->
 </form><!-- /.modal -->
 
-<script type="text/javascript" src="${root}staticcfg/js/jquery.tablesort.min.js"></script>
+<script type="text/javascript" src="$url('staticcfg/js/jquery.tablesort.min.js', v=$cache_buster)"></script>
 <script type="text/javascript">
 function urlencode(str) {
     return encodeURIComponent(str).replace(/!/g, '%21').replace(/'/g, '%27').replace(/\(/g, '%28').replace(/\)/g, '%29').replace(/\*/g, '%2A').replace(/%20/g, '+');
 }
 
-\$(document).ready(function(){
-    \$('.favicon').each(function(i, theContainer) {
-        // Easy favicon grabber
-        var favUrl = '//' + \$(theContainer).data('domain') + '/favicon.ico'
+jQuery(document).ready(function(){
+    loadFavicons()
 
-        // Does the image exist? Otherwise place a glyphicon
-        var testFavImg = new Image();
-        testFavImg.src = favUrl;
-        testFavImg.onerror = function (evt){
-            \$(theContainer).append('<span class="glyphicon glyphicon-list"></span>')
-        }
-    })
-
-    \$('.tabs a').click(function (e) {
+    jQuery('.nav-tabs a').click(function (e) {
         e.preventDefault()
-        \$(this).tab('show')
+        jQuery(this).tab('show')
     })
 
-    \$('.editFeed').click(function(){
-        var oldURI = \$(this).prev().val();
-        var whichFeed = \$(this).attr("rel");
+    // One input per feed URL, only the first one is required
+    function addFeedUrlRow(uri) {
+        var rows = jQuery('#feed_edit_urls .feed-url-row')
+        return rows.first().clone().insertAfter(rows.last()).find('input').prop('required', false).val(uri)
+    }
 
-        // Fill the values
-        \$('#feed_edit_name_label').text(whichFeed)
-        \$('#feed_edit_old_name').val(whichFeed)
-        \$('#feed_edit_new_name').val(whichFeed)
-        \$('#feed_edit_url').val(oldURI)
+    jQuery('.addFeedUrl').click(function() {
+        addFeedUrlRow('').focus()
+    })
 
-        // Show the modal
-        \$('#rss_edit_modal').modal('show');
-    });
+    jQuery('.feed-urls').on('click', '.removeFeedUrl', function() {
+        jQuery(this).closest('.feed-url-row').remove()
+        jQuery('#feed_edit_urls .feed-url-row input').first().prop('required', true)
+    })
 
-    \$('.delFeed').click(function(e){
+    // The same modal is used to add and to edit a feed
+    function showFeedModal(adding, name, uris, enable, fetchDuplicates) {
+        var modal = jQuery('#rss_edit_modal')
+        modal.attr('action', adding ? "$url('config/rss/add_rss_feed')" : "$url('config/rss/save_rss_feed')")
+        modal.find('.feed-add-only').toggle(adding)
+        modal.find('.feed-edit-only').toggle(!adding)
+        modal.find('.delFeed').attr('rel', name)
+        jQuery('#feed_edit_enable').prop('checked', enable)
+        jQuery('#feed_edit_name_label').text(name)
+        jQuery('#feed_edit_old_name').val(adding ? '' : name)
+        jQuery('#feed_edit_new_name').val(name)
+
+        // One row per URL
+        var rows = jQuery('#feed_edit_urls .feed-url-row')
+        rows.slice(1).remove()
+        rows.first().find('input').val(uris[0] || '')
+        jQuery.each(uris.slice(1), function(i, uri) {
+            addFeedUrlRow(uri)
+        })
+        jQuery('#feed_edit_fetch_duplicates').prop('checked', fetchDuplicates)
+        modal.modal('show')
+    }
+
+    // Start typing right away
+    jQuery('#rss_edit_modal').on('shown.bs.modal', function() {
+        jQuery('#feed_edit_new_name').focus().select()
+    })
+
+    jQuery('#addFeedButton').click(function() {
+        showFeedModal(true, jQuery(this).data('name'), [], true, false)
+    })
+
+    jQuery('.editFeed').click(function() {
+        var uris = jQuery(this).siblings('.feedUri').map(function() { return jQuery(this).val() }).get()
+        showFeedModal(false, jQuery(this).attr('rel'), uris, jQuery(this).data('enable') === 1, jQuery(this).data('fetch-duplicates') === 1)
+    })
+
+    jQuery('.delFeed').click(function(e){
         e.preventDefault();
         if ( confirm("$T('confirm')") ) {
-            var whichFeed = \$(this).attr("rel");
-            \$.ajax({
+            var whichFeed = jQuery(this).attr("rel");
+            jQuery.ajax({
                 type: "POST",
-                url: "del_rss_feed",
-                data: {feed: whichFeed, apikey: "$apikey" }
+                url: "$url('config/rss/del_rss_feed')",
+                data: {feed: whichFeed }
             }).done(function( msg ) {
                 // Let us leave!
                 formWasSubmitted = true;
@@ -596,12 +615,12 @@ function urlencode(str) {
         }
     });
 
-    \$('.toggleFeedCheckbox').click(function(){
-        var whichFeed = \$(this).attr("rel");
-        \$.ajax({
+    jQuery('.toggleFeedCheckbox').click(function(){
+        var whichFeed = jQuery(this).attr("rel");
+        jQuery.ajax({
             type: "POST",
-            url: "toggle_rss_feed",
-            data: {feed: whichFeed, apikey: "$apikey" }
+            url: "$url('config/rss/toggle_rss_feed')",
+            data: {feed: whichFeed }
         }).done(function() {
             // Let us leave!
             formWasSubmitted = true;
@@ -611,37 +630,37 @@ function urlencode(str) {
     });
 
     // Only the Accept filter needs all the options
-    \$('form[action="upd_rss_filter"]').find('select[name="filter_type"]').change(function() {
-        \$(this).parent().parent().find('select:not([name="filter_type"])').attr('disabled', \$(this).val() != "A" && \$(this).val() != "S")
+    jQuery('form[data-form="update-rss-filter"]').find('select[name="filter_type"]').change(function() {
+        jQuery(this).parent().parent().find('select:not([name="filter_type"])').attr('disabled', jQuery(this).val() !== "A" && jQuery(this).val() !== "S")
     })
     // Trigger on-load for all
-    \$('.disabled_options_rule').find('td select:not([name="filter_type"])').attr('disabled', true)
+    jQuery('.disabled_options_rule').find('td select:not([name="filter_type"])').attr('disabled', true)
 
     function setActiveIcon(objButton) {
         // Let's make it look like things are happening!
-        \$(objButton).attr('disabled', true)
-        \$(objButton).find('span').remove()
-        \$(objButton).prepend('<span class="glyphicon glyphicon-transfer"></span>')
+        jQuery(objButton).attr('disabled', true)
+        jQuery(objButton).find('span').remove()
+        jQuery(objButton).prepend('<span class="glyphicon glyphicon-transfer"></span>')
     }
 
     // Enable sorting and set default
-    if (\$('#rss-tab-matched table').length) {
-        \$('#rss-tab-matched table').tablesort().data('tablesort').sort(\$('#rss-tab-matched th.default-sort'), 'desc');
+    if (jQuery('#rss-tab-matched table').length) {
+        jQuery('#rss-tab-matched table').tablesort().data('tablesort').sort(jQuery('#rss-tab-matched th.default-sort'), 'desc');
     }
-    if (\$('#rss-tab-not-matched table').length) {
-        \$('#rss-tab-not-matched table').tablesort().data('tablesort').sort(\$('#rss-tab-not-matched th.default-sort'), 'desc');
+    if (jQuery('#rss-tab-not-matched table').length) {
+        jQuery('#rss-tab-not-matched table').tablesort().data('tablesort').sort(jQuery('#rss-tab-not-matched th.default-sort'), 'desc');
     }
-    if (\$('#rss-tab-done table').length) {
-        \$('#rss-tab-done table').tablesort().data('tablesort').sort(\$('#rss-tab-done th.default-sort'), 'desc');
+    if (jQuery('#rss-tab-done table').length) {
+        jQuery('#rss-tab-done table').tablesort().data('tablesort').sort(jQuery('#rss-tab-done th.default-sort'), 'desc');
     }
 
-    \$('.testFeed').click(function(){
+    jQuery('.testFeed').click(function(){
         setActiveIcon(this)
-        var whichFeed = \$(this).attr("rel");
-        \$.ajax({
+        var whichFeed = jQuery(this).attr("rel");
+        jQuery.ajax({
             type: "POST",
-            url: "test_rss_feed",
-            data: {feed: whichFeed, apikey: "$apikey" }
+            url: "$url('config/rss/test_rss_feed')",
+            data: {feed: whichFeed }
         }).done(function( msg ) {
             // Let us leave!
             formWasSubmitted = true;
@@ -650,34 +669,34 @@ function urlencode(str) {
         });
     });
 
-    \$('.cleanFeed').click(function(){
+    jQuery('.cleanFeed').click(function(){
         setActiveIcon(this)
-        var theForm = \$(this).closest("form");
-        theForm.attr("action", "clean_rss_jobs").submit();
+        var theForm = jQuery(this).closest("form");
+        theForm.attr("action", "$url('config/rss/clean_rss_jobs')").submit();
     });
 
-    \$('.evalFeed').click(function(){
+    jQuery('.evalFeed').click(function(){
         setActiveIcon(this)
-        var theForm = \$(this).closest("form");
-        theForm.attr("action", "eval_rss_feed").submit();
+        var theForm = jQuery(this).closest("form");
+        theForm.attr("action", "$url('config/rss/eval_rss_feed')").submit();
     });
 
-    \$('.delFilter').click(function(){
-        var theForm = \$(this).closest("form");
-        theForm.attr("action", "del_rss_filter").submit();
+    jQuery('.delFilter').click(function(){
+        var theForm = jQuery(this).closest("form");
+        theForm.attr("action", "$url('config/rss/del_rss_filter')").submit();
     });
 
-    \$('form[action="download"]').ajaxForm({
+    jQuery('form[data-form="download-rss-job"]').ajaxForm({
         datatype: 'json',
         beforeSubmit: function (_, form) {
-            \$(form).find('button').attr("disabled", "disabled")
+            jQuery(form).find('button').attr("disabled", "disabled")
             // Remove icon and add new one
-            \$(form).find('button span').remove()
-            \$(form).find('button').prepend('<span class="glyphicon glyphicon-transfer"></span>')
+            jQuery(form).find('button span').remove()
+            jQuery(form).find('button').prepend('<span class="glyphicon glyphicon-transfer"></span>')
         },
         success: function (_, _, _, form) {
             // Set success
-            \$(form).find('button').html('<span class="glyphicon glyphicon-ok"></span> $T('rss-added')')
+            jQuery(form).find('button').html('<span class="glyphicon glyphicon-ok"></span> $T('rss-added')')
         }
     });
 

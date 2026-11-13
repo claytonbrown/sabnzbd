@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -OO
-# Copyright 2007-2021 The SABnzbd-Team <team@sabnzbd.org>
+# Copyright 2007-2026 by The SABnzbd-Team (sabnzbd.org)
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -19,27 +19,47 @@
 tests.test_functional_config - Basic testing if Config pages work
 """
 
-from selenium.common.exceptions import NoSuchElementException, UnexpectedAlertPresentException, NoAlertPresentException
+from playwright.sync_api import Error as PlaywrightError, expect
 from pytest_httpserver import HTTPServer
 
 
-from tests.testhelper import *
+import os
+import re
+from tests.testhelper import (
+    SAB_DATA_DIR,
+    SAB_HOST,
+    SAB_PORT,
+    SAB_NEWSSERVER_HOST,
+    SAB_NEWSSERVER_PORT,
+    SABnzbdBaseTest,
+    create_and_read_nzb_fp,
+    get_api_result,
+    wait_for,
+)
 
 
 class TestBasicPages(SABnzbdBaseTest):
     def test_base_pages(self):
         # Quick-check of all Config pages
-        test_urls = ["config", "config/server", "config/categories", "config/scheduling", "config/rss"]
+        test_urls = [
+            "config",
+            "config/server",
+            "config/categories",
+            "config/scheduling",
+            "config/rss",
+            "config/nzbsearch",
+        ]
 
         for test_url in test_urls:
             self.open_page("http://%s:%s/%s" % (SAB_HOST, SAB_PORT, test_url))
 
     def test_base_submit_pages(self):
+        # The save button is re-enabled on a 1s timer that is only scheduled once the response lands
+        self.page.clock.install()
         test_urls_with_submit = [
             "config/general",
             "config/folders",
             "config/switches",
-            "config/sorting",
             "config/notify",
             "config/special",
         ]
@@ -48,139 +68,96 @@ class TestBasicPages(SABnzbdBaseTest):
             self.open_page("http://%s:%s/%s" % (SAB_HOST, SAB_PORT, test_url))
 
             # Can only click the visible buttons
-            submit_btns = self.selenium_wrapper(self.driver.find_elements_by_class_name, "saveButton")
-            for submit_btn in submit_btns:
-                if submit_btn.is_displayed():
-                    break
-            else:
-                raise NoSuchElementException
+            submit_btn = self.page.locator(".saveButton:visible").first
+            expect(submit_btn).to_be_visible()
 
-            # Click the right button
-            submit_btn.click()
-
-            try:
-                self.wait_for_ajax()
-            except UnexpectedAlertPresentException:
-                try:
-                    # Ignore restart-request due to empty sabnzbd.ini in tests
-                    self.selenium_wrapper(self.driver.switch_to.alert.dismiss)
-                except NoAlertPresentException:
-                    pass
+            with self.page.expect_response(lambda r: r.request.method == "POST"):
+                submit_btn.click()
+            self.page.clock.run_for(1000)
 
             # For Specials page we get redirected after save, so check for no crash
             if "special" in test_url:
                 self.no_page_crash()
             else:
-                # For others if all is fine, button will be back to normal in 1 second
-                time.sleep(1.5)
-                assert submit_btn.text == "Save Changes"
+                # For others if all is fine, the button will be back to normal
+                expect(submit_btn).to_have_text("Save Changes", timeout=1500)
 
 
 class TestConfigLogin(SABnzbdBaseTest):
     def test_login(self):
         # Test if base page works
-        self.open_page("http://%s:%s/sabnzbd/config/general" % (SAB_HOST, SAB_PORT))
+        self.open_page("http://%s:%s/config/general" % (SAB_HOST, SAB_PORT))
 
         # Set the username and password
-        username_imp = self.selenium_wrapper(self.driver.find_element_by_css_selector, "input[data-hide='username']")
-        username_imp.clear()
-        username_imp.send_keys("test_username")
-        pass_inp = self.selenium_wrapper(self.driver.find_element_by_css_selector, "input[data-hide='password']")
-        pass_inp.clear()
-        pass_inp.send_keys("test_password")
+        self.page.locator("input[data-hide='username']").fill("test_username")
+        self.page.locator("input[data-hide='password']").fill("test_password")
 
-        # Submit and ignore alert
-        self.selenium_wrapper(self.driver.find_element_by_class_name, "saveButton").click()
-
-        try:
-            self.wait_for_ajax()
-        except UnexpectedAlertPresentException:
-            try:
-                # Ignore restart-request
-                self.driver.switch_to.alert.dismiss()
-            except NoAlertPresentException:
-                pass
+        # Credentials apply straight away, so the session is dropped and we land on the login page
+        self.page.locator(".saveButton").first.click()
+        self.page.wait_for_url(re.compile(r"/login"))
 
         # Open any page and check if we get redirected
-        self.open_page("http://%s:%s/sabnzbd/general" % (SAB_HOST, SAB_PORT))
-        assert "/login/" in self.driver.current_url
+        self.open_page("http://%s:%s/config/general" % (SAB_HOST, SAB_PORT))
+        assert "/login" in self.page.url
 
         # Fill nonsense and submit
-        username_login = self.selenium_wrapper(self.driver.find_element_by_css_selector, "input[name='username']")
-        username_login.clear()
-        username_login.send_keys("nonsense")
-        pass_login = self.selenium_wrapper(self.driver.find_element_by_css_selector, "input[name='password']")
-        pass_login.clear()
-        pass_login.send_keys("nonsense")
-        self.driver.find_element_by_tag_name("button").click()
+        self.page.locator("input[name='username']").fill("nonsense")
+        self.page.locator("input[name='password']").fill("nonsense")
+        self.page.locator("button").first.click()
 
         # Check if we were denied
-        assert (
-            "Authentication failed"
-            in self.selenium_wrapper(self.driver.find_element_by_class_name, "alert-danger").text
-        )
+        expect(self.page.locator(".alert-danger")).to_contain_text("Authentication failed")
 
         # Fill right stuff
-        username_login = self.selenium_wrapper(self.driver.find_element_by_css_selector, "input[name='username']")
-        username_login.clear()
-        username_login.send_keys("test_username")
-        pass_login = self.selenium_wrapper(self.driver.find_element_by_css_selector, "input[name='password']")
-        pass_login.clear()
-        pass_login.send_keys("test_password")
-        self.driver.find_element_by_tag_name("button").click()
+        self.page.locator("input[name='username']").fill("test_username")
+        self.page.locator("input[name='password']").fill("test_password")
+        self.page.locator("button").first.click()
 
         # Can we now go to the page and empty the settings again?
-        self.open_page("http://%s:%s/sabnzbd/config/general" % (SAB_HOST, SAB_PORT))
-        assert "/login/" not in self.driver.current_url
+        self.open_page("http://%s:%s/config/general" % (SAB_HOST, SAB_PORT))
+        assert "/login" not in self.page.url
 
         # Set the username and password
-        username_imp = self.selenium_wrapper(self.driver.find_element_by_css_selector, "input[data-hide='username']")
-        username_imp.clear()
-        pass_inp = self.selenium_wrapper(self.driver.find_element_by_css_selector, "input[data-hide='password']")
-        pass_inp.clear()
+        self.page.locator("input[data-hide='username']").fill("")
+        self.page.locator("input[data-hide='password']").fill("")
 
-        # Submit and ignore alert
-        self.selenium_wrapper(self.driver.find_element_by_class_name, "saveButton").click()
+        with self.page.expect_response(lambda r: r.request.method == "POST"):
+            self.page.locator(".saveButton").first.click()
 
-        try:
-            self.wait_for_ajax()
-        except UnexpectedAlertPresentException:
-            try:
-                # Ignore restart-request
-                self.driver.switch_to.alert.dismiss()
-            except NoAlertPresentException:
-                pass
-
-        # Open any page and check if we get redirected
-        self.open_page("http://%s:%s/sabnzbd/general" % (SAB_HOST, SAB_PORT))
-        assert "/login/" not in self.driver.current_url
+        # Open any page and check we are NOT redirected to login (no credentials set)
+        self.open_page("http://%s:%s/config/general" % (SAB_HOST, SAB_PORT))
+        assert "/login" not in self.page.url
 
 
 class TestConfigCategories(SABnzbdBaseTest):
-
     category_name = "testCat"
 
     def test_page(self):
         # Test if base page works
-        self.open_page("http://%s:%s/sabnzbd/config/categories" % (SAB_HOST, SAB_PORT))
+        self.open_page("http://%s:%s/config/categories" % (SAB_HOST, SAB_PORT))
 
-        # Add new category
-        self.driver.find_elements_by_name("newname")[1].send_keys("testCat")
-        self.selenium_wrapper(
-            self.driver.find_element_by_xpath, "//button/text()[normalize-space(.)='Add']/parent::*"
-        ).click()
+        # Add new category, the page reloads itself after saving
+        self.page.locator("[name='newname']").nth(1).fill(self.category_name)
+        with self.page.expect_navigation():
+            self.page.locator("xpath=//button/text()[normalize-space(.)='Add']/parent::*").click()
         self.no_page_crash()
-        assert self.category_name not in self.driver.page_source
+
+        # Category names are stored lowercased, so the name as typed must not come back
+        assert self.category_name not in self.page.content()
+
+        # Reload and confirm it was really saved. Without this the test passes whether the
+        # POST was accepted or refused, because a rejected save leaves the name absent too.
+        self.open_page("http://%s:%s/config/categories" % (SAB_HOST, SAB_PORT))
+        assert self.category_name.lower() in self.page.content()
 
 
 class TestConfigRSS(SABnzbdBaseTest):
-
-    rss_name = "_SeleniumFeed"
+    rss_name = "_PlaywrightFeed"
 
     def test_rss_basic_flow(self, httpserver: HTTPServer):
         # Setup the response for the NZB
-        nzb_data = create_and_read_nzb("basic_rar5")
-        httpserver.expect_request("/test_nzb.nzb").respond_with_data(nzb_data)
+        nzb_fp = create_and_read_nzb_fp("basic_rar5")
+        httpserver.expect_request("/test_nzb.nzb").respond_with_data(nzb_fp.read())
         nzb_url = httpserver.url_for("/test_nzb.nzb")
 
         # Set the response for the RSS-feed, replacing the URL to the NZB
@@ -191,59 +168,41 @@ class TestConfigRSS(SABnzbdBaseTest):
         rss_url = httpserver.url_for("/rss_feed.xml")
 
         # Test if base page works
-        self.open_page("http://%s:%s/sabnzbd/config/rss" % (SAB_HOST, SAB_PORT))
+        self.open_page("http://%s:%s/config/rss" % (SAB_HOST, SAB_PORT))
 
-        # Uncheck enabled-checkbox for new feeds
-        self.selenium_wrapper(
-            self.driver.find_element_by_xpath, '//form[@action="add_rss_feed"]//input[@name="enable"]'
-        ).click()
-        input_name = self.selenium_wrapper(
-            self.driver.find_element_by_xpath, '//form[@action="add_rss_feed"]//input[@name="feed"]'
-        )
-        input_name.clear()
-        input_name.send_keys(self.rss_name)
-        self.selenium_wrapper(
-            self.driver.find_element_by_xpath, '//form[@action="add_rss_feed"]//input[@name="uri"]'
-        ).send_keys(rss_url)
-        self.selenium_wrapper(self.driver.find_element_by_xpath, '//form[@action="add_rss_feed"]//button').click()
+        # Add the feed through the modal
+        self.page.locator("#addFeedButton").click()
+        add_form = self.page.locator("#rss_edit_modal")
+        add_form.locator("input[name='feed_new_name']").fill(self.rss_name)
+        add_form.locator("input[name='uri']").fill(rss_url)
+        add_form.locator("button[type='submit']").click()
 
         # Check if we have results
-        tab_results = int(
-            self.selenium_wrapper(self.driver.find_element_by_xpath, '//a[@href="#rss-tab-matched"]/span').text
-        )
+        matched_count = self.page.locator('xpath=//a[@href="#rss-tab-matched"]/span')
+        expect(matched_count).to_be_visible()
+        tab_results = int(matched_count.inner_text())
         assert tab_results > 0
 
         # Check if it matches the number of rows
-        tab_table_results = len(self.driver.find_elements_by_xpath('//div[@id="rss-tab-matched"]/table/tbody/tr'))
+        tab_table_results = self.page.locator('xpath=//div[@id="rss-tab-matched"]/table/tbody/tr').count()
         assert tab_table_results == tab_results
 
         # Pause the queue do we don't download stuff
         assert get_api_result("pause") == {"status": True}
 
         # Download something
-        download_btn = self.selenium_wrapper(
-            self.driver.find_element_by_xpath, '//div[@id="rss-tab-matched"]/table/tbody//button'
-        )
+        download_btn = self.page.locator('xpath=//div[@id="rss-tab-matched"]/table/tbody//button').first
         download_btn.click()
-        self.wait_for_ajax()
 
         # Does the page think it's a success?
-        assert "Added NZB" in download_btn.text
+        expect(download_btn).to_contain_text("Added NZB", timeout=5000)
 
-        # Wait 2 seconds for the fetch
-        time.sleep(2)
-
-        # Let's check the queue
-        for _ in range(10):
-            queue_result_slots = get_api_result("queue")["queue"]["slots"]
-            # Check if the fetch-request was added to the queue
-            if queue_result_slots:
-                break
-            time.sleep(1)
-        else:
-            # The loop never stopped, so we fail
-            pytest.fail("Did not find the RSS job in the queue")
-            return
+        # Check if the fetch-request was added to the queue
+        wait_for(
+            lambda: len(get_api_result("queue")["queue"]["slots"]) > 0,
+            timeout=10,
+            err_msg="Did not find the RSS job in the queue",
+        )
 
         # Let's remove this thing
         get_api_result("queue", extra_arguments={"name": "delete", "value": "all"})
@@ -254,58 +213,83 @@ class TestConfigRSS(SABnzbdBaseTest):
 
 
 class TestConfigServers(SABnzbdBaseTest):
-
-    server_name = "_SeleniumServer"
+    server_name = "_PlaywrightServer"
 
     def open_config_servers(self):
         # Test if base page works
-        self.open_page("http://%s:%s/sabnzbd/config/server" % (SAB_HOST, SAB_PORT))
-        self.scroll_to_top()
+        self.open_page("http://%s:%s/config/server" % (SAB_HOST, SAB_PORT))
 
         # Show advanced options
-        advanced_btn = self.selenium_wrapper(self.driver.find_element_by_name, "advanced-settings-button")
-        if not advanced_btn.get_attribute("checked"):
+        advanced_btn = self.page.locator("[name='advanced-settings-button']")
+        if not advanced_btn.is_checked():
             advanced_btn.click()
 
     def add_test_server(self):
         # Add server
-        self.selenium_wrapper(self.driver.find_element_by_id, "addServerButton").click()
-        host_inp = self.selenium_wrapper(self.driver.find_element_by_name, "host")
-        host_inp.clear()
-        host_inp.send_keys(SAB_NEWSSERVER_HOST)
+        self.page.locator("#addServerButton").click()
+        self.page.locator("[name='host']").fill(SAB_NEWSSERVER_HOST)
 
         # Change port
-        port_inp = self.selenium_wrapper(self.driver.find_element_by_name, "port")
-        port_inp.clear()
-        port_inp.send_keys(SAB_NEWSSERVER_PORT)
+        port_inp = self.page.locator("[name='port']")
+        port_inp.fill(str(SAB_NEWSSERVER_PORT))
+
+        # Disable SSL for testing
+        self.page.locator("[name='ssl']").click()
 
         # Test server-check
-        self.selenium_wrapper(self.driver.find_element_by_css_selector, "#addServerContent .testServer").click()
-        self.wait_for_ajax()
-        check_result = self.selenium_wrapper(
-            self.driver.find_element_by_css_selector, "#addServerContent .result-box"
-        ).text
-        assert "Connection Successful" in check_result
+        self.page.locator("#addServerContent .testServer").click()
+        expect(self.page.locator("#addServerContent .result-box")).to_contain_text(
+            "Connection Successful", timeout=5000
+        )
 
         # Set test-servername
-        self.selenium_wrapper(self.driver.find_element_by_id, "displayname").send_keys(self.server_name)
+        self.page.locator("#displayname").fill(self.server_name)
 
-        # Add and show details
-        port_inp.send_keys(Keys.RETURN)
-        time.sleep(1)
-        if not self.selenium_wrapper(self.driver.find_element_by_id, "host0").is_displayed():
-            self.selenium_wrapper(self.driver.find_element_by_class_name, "showserver").click()
+        # Add and show details, once the reload that saving a new server triggers has landed
+        with self.page.expect_navigation():
+            port_inp.press("Enter")
+        expect(self.page.locator("#host0")).to_be_hidden(timeout=2000)
+        self.page.locator(".showserver").first.click()
+        expect(self.page.locator(".delServer").first).to_be_visible()
 
     def remove_server(self):
         # Remove the first server and accept the confirmation
-        self.selenium_wrapper(self.driver.find_element_by_class_name, "delServer").click()
-        self.driver.switch_to.alert.accept()
+        self.click_expecting_dialog(self.page.locator(".delServer").first, accept=True)
 
-        # Check that it's gone
-        time.sleep(2)
-        assert self.server_name not in self.driver.page_source
+        # Check that it's gone. Deleting reloads, so a read can land mid-navigation and raise
+        wait_for(
+            lambda: self.server_name not in self.page.content(),
+            timeout=5,
+            err_msg=f"Page still contains '{self.server_name}'",
+            suppress=(PlaywrightError,),
+        )
 
     def test_add_and_remove_server(self):
         self.open_config_servers()
         self.add_test_server()
         self.remove_server()
+
+
+class TestGlitterInterface(SABnzbdBaseTest):
+    """Glitter funnels every call through callAPI, so a wrong CSRF header fails all of them at once"""
+
+    def test_interface_loads_and_polls(self):
+        # skip_wizard because the test ini configures no servers, so / would redirect there
+        self.open_page("http://%s:%s/?skip_wizard=1" % (SAB_HOST, SAB_PORT))
+
+        # Glitter polls forever, so there is no network-idle; isLoaded marks the first refresh
+        expect(self.page.locator(".main-content")).to_have_class(re.compile(r"main-content-loaded"))
+
+        # The token reached the page and was installed for every request. Checked because a
+        # missing csrfToken global would throw inside glitter.basic.js and stop the rest of
+        # the interface from initialising -- which leaves the overlay below hidden, so the
+        # overlay alone would not notice.
+        assert self.page.evaluate(
+            "csrfToken.length === 64 && ($.ajaxSettings.headers || {})['X-SABnzbd-CSRF'] === csrfToken"
+        ), "Glitter did not install the CSRF header on its API calls"
+
+        # The queue and history refresh drop this overlay over the page when they fail, so
+        # its absence is what says those calls came back authorized
+        assert not self.page.locator(
+            ".main-restarting"
+        ).is_visible(), "Glitter showed the reconnect overlay, so its API calls failed"

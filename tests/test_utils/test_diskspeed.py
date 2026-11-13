@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -OO
-# Copyright 2007-2021 The SABnzbd-Team <team@sabnzbd.org>
+# Copyright 2007-2026 by The SABnzbd-Team (sabnzbd.org)
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -20,19 +20,17 @@ tests.test_utils.test_diskspeed - Testing SABnzbd diskspeed
 """
 
 import os
-import pytest
 import tempfile
 from sabnzbd.utils.diskspeed import diskspeedmeasure
 from tests.testhelper import SAB_CACHE_DIR
 
 
-@pytest.mark.usefixtures("clean_cache_dir")
 class TestDiskSpeed:
     """test sabnzbd.utils.diskspeed"""
 
-    def test_disk_speed(self):
+    def test_disk_speed(self, tmp_path):
         """Test the normal use case: writable directory"""
-        speed = diskspeedmeasure(SAB_CACHE_DIR)
+        speed = diskspeedmeasure(str(tmp_path))
         assert speed > 0.0
         assert isinstance(speed, float)
 

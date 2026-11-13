@@ -6,8 +6,6 @@ function QueueListModel(parent) {
     var self = this;
     self.parent = parent;
     self.dragging = false;
-    self.rawCatList = [];
-    self.rawScriptList = [];
 
     // Because SABNZB returns the name
     // But when you want to set Priority you need the number..
@@ -34,12 +32,13 @@ function QueueListModel(parent) {
     // External var's
     self.queueItems = ko.observableArray([]);
     self.totalItems = ko.observable(0);
+    self.deleteItems = ko.observableArray([]);
     self.isMultiEditing = ko.observable(false).extend({ persist: 'queueIsMultiEditing' });
     self.isLoading = ko.observable(false).extend({ rateLimit: 100 });
     self.multiEditItems = ko.observableArray([]);
     self.categoriesList = ko.observableArray([]);
     self.scriptsList = ko.observableArray([]);
-    self.searchTerm = ko.observable('').extend({ rateLimit: { timeout: 200, method: "notifyWhenChangesStop" } });
+    self.searchTerm = ko.observable('').extend({ rateLimit: { timeout: 400, method: "notifyWhenChangesStop" } });
     self.paginationLimit = ko.observable(20).extend({ persist: 'queuePaginationLimit' });
     self.pagination = new paginationModel(self);
 
@@ -66,31 +65,6 @@ function QueueListModel(parent) {
             return i.id;
         });
 
-        // Did the category-list change?
-        // Otherwise KO will send updates to all <select> for every refresh()
-        if(self.rawCatList != data.categories.toString()) {
-            // Reformat categories
-            self.categoriesList($.map(data.categories, function(cat) {
-                // Default?
-                if(cat == '*') return { catValue: '*', catText: glitterTranslate.defaultText };
-                return { catValue: cat, catText: cat };
-            }))
-            // Update
-            self.rawCatList = data.categories.toString();
-        }
-
-        // Did the script-list change?
-        if(self.rawScriptList != data.scripts.toString()) {
-            // Reformat script-list
-            self.scriptsList($.map(data.scripts, function(script) {
-                // Default?
-                if(script == 'None') return glitterTranslate.noneText;
-                return script;
-            }))
-            // Update
-            self.rawScriptList = data.scripts.toString();
-        }
-
         // Set limit
         self.totalItems(data.noofslots);
 
@@ -101,7 +75,7 @@ function QueueListModel(parent) {
         $.each(data.slots, function() {
             var item = this;
             var existingItem = ko.utils.arrayFirst(self.queueItems(), function(i) {
-                return i.id == item.nzo_id;
+                return i.id === item.nzo_id;
             });
 
             if(existingItem) {
@@ -114,7 +88,7 @@ function QueueListModel(parent) {
         });
 
         // Remove all items if there's any
-        if(itemIds.length == self.paginationLimit()) {
+        if(itemIds.length === self.paginationLimit()) {
             // Replace it, so only 1 Knockout DOM-update!
             self.queueItems(newItems);
             newItems = [];
@@ -123,7 +97,7 @@ function QueueListModel(parent) {
             $.each(itemIds, function() {
                 var id = this.toString();
                 self.queueItems.remove(ko.utils.arrayFirst(self.queueItems(), function(i) {
-                    return i.id == id;
+                    return i.id === id;
                 }));
             });
         }
@@ -174,6 +148,27 @@ function QueueListModel(parent) {
 
     }
 
+    self.triggerRemoveDownload = function(items) {
+        // Show and fill modal
+        self.deleteItems.removeAll()
+
+        // Single or multiple items?
+        if(items.length) {
+            ko.utils.arrayPushAll(self.deleteItems, items)
+        } else {
+            self.deleteItems.push(items)
+        }
+
+        // Show modal or delete right away
+        if(self.parent.confirmDeleteQueue()) {
+            // Open modal if desired
+            $('#modal-delete-queue-job').modal("show")
+        } else {
+            // Otherwise just submit right away
+            $('#modal-delete-queue-job form').submit()
+        }
+    }
+
     // Save pagination state
     self.paginationLimit.subscribe(function(newValue) {
         // Save in config if global
@@ -185,6 +180,8 @@ function QueueListModel(parent) {
                 value: newValue
             })
         }
+        // Update pagination and counters
+        self.parent.refresh(true)
     });
 
     // Do we show search box. So it doesn't dissapear when nothing is found
@@ -194,26 +191,27 @@ function QueueListModel(parent) {
 
     // Searching in queue (rate-limited in decleration)
     self.searchTerm.subscribe(function() {
-        // Refresh now
-        self.parent.refresh();
         // Go back to page 1
-        if(self.pagination.currentPage() != 1) {
+        if(self.pagination.currentPage() !== 1) {
+            // This forces a refresh
             self.pagination.moveToPage(1);
+        } else {
+            // Refresh now
+            self.parent.refresh();
         }
     })
 
     // Clear searchterm
     self.clearSearchTerm = function(data, event) {
         // Was it escape key or click?
-        if(event.type == 'mousedown' || (event.keyCode && event.keyCode == 27)) {
+        if(event.type === 'click' || (event.keyCode && event.keyCode === 27)) {
             self.isLoading(true)
             self.searchTerm('');
-            self.parent.refresh()
         }
         // Was it click and the field is empty? Then we focus on the field
-        if(event.type == 'mousedown' && self.searchTerm() == '') {
+        if(event.type === 'click' && self.searchTerm() === '') {
             $(event.target).parents('.search-box').find('input[type="text"]').focus()
-            return;
+            return false;
         }
         // Need to return true to allow typing
         return true;
@@ -226,6 +224,14 @@ function QueueListModel(parent) {
         // What action?
         var sort, dir;
         switch($(event.currentTarget).data('action')) {
+            case 'sortRemainingAsc':
+                sort = 'remaining';
+                dir = 'asc';
+                break;
+            case 'sortRemainingBytesAsc':
+                sort = 'remaining_bytes';
+                dir = 'asc';
+                break;
             case 'sortAgeAsc':
                 sort = 'avg_age';
                 dir = 'desc';
@@ -274,7 +280,7 @@ function QueueListModel(parent) {
         // Reset form and remove all checked ones
         $form[0].reset();
         self.multiEditItems.removeAll();
-        $('.delete input[name="multiedit"], #multiedit-checkall').prop({'checked': false, 'indeterminate': false})
+        $('.queue-table input[name="multiedit"], #multiedit-checkall-queue').prop({'checked': false, 'indeterminate': false})
 
         // Is the multi-edit in view?
         if(($form.offset().top + $form.outerHeight(true)) > ($(window).scrollTop()+$(window).height())) {
@@ -304,7 +310,7 @@ function QueueListModel(parent) {
         }
 
         // Update check-all buton state
-        setCheckAllState('#multiedit-checkall', '.queue-table input[name="multiedit"]')
+        setCheckAllState('#multiedit-checkall-queue', '.queue-table input[name="multiedit"]')
         return true;
     }
 
@@ -315,7 +321,7 @@ function QueueListModel(parent) {
 
         // We need to re-evaltuate the state of this check-all
         // Otherwise the 'inderterminate' will be overwritten by the click event!
-        setCheckAllState('#multiedit-checkall', '.queue-table input[name="multiedit"]')
+        setCheckAllState('#multiedit-checkall-queue', '.queue-table input[name="multiedit"]')
 
         // Now we can check what happend
         // For when some are checked, or all are checked (but not partly)
@@ -347,7 +353,7 @@ function QueueListModel(parent) {
             self.doMultiEditUpdate()
         }
         // Set state of all the check-all's
-        setCheckAllState('#multiedit-checkall', '.queue-table input[name="multiedit"]')
+        setCheckAllState('#multiedit-checkall-queue', '.queue-table input[name="multiedit"]')
         return true;
     }
 
@@ -364,91 +370,159 @@ function QueueListModel(parent) {
         var newStatus = $('.multioperations-selector input[name="multiedit-status"]:checked').val()
 
         // List all the ID's
-        var  strIDs = '';
+        var strIDs = '';
         $.each(self.multiEditItems(), function(index) {
             strIDs = strIDs + this.id + ',';
         })
 
+        // All non-category updates need to only happen after a category update
+        function nonCatUpdates() {
+            if(newScript !== '') {
+                callAPI({
+                    mode: 'change_script',
+                    value: strIDs,
+                    value2: newScript
+                })
+            }
+            if(newPrior !== '') {
+                callAPI({
+                    mode: 'queue',
+                    name: 'priority',
+                    value: strIDs,
+                    value2: newPrior
+                })
+            }
+            if(newProc !== '') {
+                callAPI({
+                    mode: 'change_opts',
+                    value: strIDs,
+                    value2: newProc
+                })
+            }
+            if(newStatus) {
+                callAPI({
+                    mode: 'queue',
+                    name: newStatus,
+                    value: strIDs
+                })
+            }
+
+            // Wat a little and do the refresh
+            // Only if anything changed!
+            if(newStatus || newProc !== '' || newPrior !== '' || newScript !== '' || newCat !== '') {
+                setTimeout(parent.refresh, 100)
+            }
+        }
+
         // What is changed?
-        if(newCat != '') {
+        if(newCat !== '') {
             callAPI({
                 mode: 'change_cat',
                 value: strIDs,
                 value2: newCat
-            })
-        }
-        if(newScript != '') {
-            callAPI({
-                mode: 'change_script',
-                value: strIDs,
-                value2: newScript
-            })
-        }
-        if(newPrior != '') {
-            callAPI({
-                mode: 'queue',
-                name: 'priority',
-                value: strIDs,
-                value2: newPrior
-            })
-        }
-        if(newProc != '') {
-            callAPI({
-                mode: 'change_opts',
-                value: strIDs,
-                value2: newProc
-            })
-        }
-        if(newStatus) {
-            callAPI({
-                mode: 'queue',
-                name: newStatus,
-                value: strIDs
-            })
+            }).then(nonCatUpdates)
+        } else {
+            nonCatUpdates()
         }
 
-        // Wat a little and do the refresh
-        // Only if anything changed!
-        if(newStatus || newProc != '' || newPrior != '' || newScript != '' || newCat != '') {
-            setTimeout(parent.refresh, 100)
-        }
     }
 
-    // Selete all selected
+    // Handle mousedown to capture state before change
+    self.handleMultiEditStatusMouseDown = function(item, event) {
+        var clickedValue = $(event.currentTarget).find("input").val();
+
+        // If this radio was already selected (same value as previous), clear it
+        if ($('.multioperations-selector input[name="multiedit-status"]:checked').val() === clickedValue) {
+            // Clear all radio buttons in this group after the click finished
+            // Hacky, but it works
+            setTimeout(function () {
+                $('.multioperations-selector input[name="multiedit-status"]').prop('checked', false);
+            }, 200)
+        }
+        return true;
+    }
+
+    // Remove downloads from queue
+    self.removeDownloads = function(form) {
+        // Hide modal and show notification
+        $('#modal-delete-queue-job').modal("hide")
+        showNotification('.main-notification-box-removing')
+
+        var strIDs = '';
+        $.each(self.deleteItems(), function(index) {
+            strIDs = strIDs + this.id + ',';
+        })
+
+        callAPI({
+            mode: 'queue',
+            name: 'delete',
+            del_files: 1,
+            value: strIDs
+        }).then(function(response) {
+            self.queueItems.removeAll(self.deleteItems());
+            self.multiEditItems.removeAll(self.deleteItems())
+            self.parent.refresh();
+            hideNotification()
+        });
+    };
+
+    // Delete all selected
     self.doMultiDelete = function() {
         // Anything selected?
         if(self.multiEditItems().length < 1) return;
 
-        // Need confirm
-        if(!self.parent.confirmDeleteQueue() || confirm(glitterTranslate.removeDown)) {
-            // List all the ID's
-            var strIDs = '';
-            $.each(self.multiEditItems(), function(index) {
-                strIDs = strIDs + this.id + ',';
-            })
-
-            // Show notification
-            showNotification('.main-notification-box-removing-multiple', 0, self.multiEditItems().length)
-
-            // Remove
-            callAPI({
-                mode: 'queue',
-                name: 'delete',
-                del_files: 1,
-                value: strIDs
-            }).then(function(response) {
-                if(response.status) {
-                    // Make sure the queue doesnt flicker and then fade-out
-                    self.isLoading(true)
-                    self.parent.refresh()
-                    // Empty it
-                    self.multiEditItems.removeAll();
-                    // Hide notification
-                    hideNotification()
-                }
-            })
-        }
+        // Trigger modal
+        self.triggerRemoveDownload(self.multiEditItems())
     }
+
+    // Move all selected to top
+    self.doMultiMoveToTop = function() {
+        // Anything selected?
+        if(self.multiEditItems().length < 1) return;
+
+        // Move each item to the top, starting from the last one in the sorted list
+        var arrayList = self.multiEditItems()
+        var movePromises = [];
+        for(var i = arrayList.length - 1; i >= 0; i--) {
+            movePromises.push(callAPI({
+                mode: "switch",
+                value: arrayList[i].id,
+                value2: 0
+            }));
+        }
+
+        // Wait for all moves to complete then refresh
+        Promise.all(movePromises).then(function() {
+            self.parent.refresh();
+        });
+    }
+
+    // Move all selected to bottom
+    self.doMultiMoveToBottom = function() {
+        // Anything selected?
+        if(self.multiEditItems().length < 1) return;
+
+        // Move each item to the bottom, starting from the first one in the sorted list
+        var arrayList = self.multiEditItems()
+        var movePromises = [];
+        for(var i = 0; i < arrayList.length; i++) {
+            movePromises.push(callAPI({
+                mode: "switch",
+                value: arrayList[i].id,
+                value2: self.totalItems() - 1
+            }));
+        }
+
+        // Wait for all moves to complete then refresh
+        Promise.all(movePromises).then(function() {
+            self.parent.refresh();
+        });
+    }
+
+    // Focus on the confirm button
+    $('#modal-delete-queue-job').on("shown.bs.modal", function() {
+        $('#modal-delete-queue-job .btn[type="submit"]').focus()
+    })
 
     // On change of page we need to check all those that were in the list!
     self.queueItems.subscribe(function() {
@@ -459,7 +533,7 @@ function QueueListModel(parent) {
             })
 
             // Update check-all buton state
-            setCheckAllState('#multiedit-checkall', '.queue-table input[name="multiedit"]')
+            setCheckAllState('#multiedit-checkall-queue', '.queue-table input[name="multiedit"]')
         }, 100)
     }, null, "arrayChange")
 }
@@ -479,8 +553,8 @@ function QueueModel(parent, data) {
     self.index = ko.observable(data.index);
     self.status = ko.observable(data.status);
     self.labels = ko.observableArray(data.labels);
-    self.isGrabbing = ko.observable(data.status == 'Grabbing' || data.avg_age == '-')
-    self.isFetchingBlocks = data.status == 'Fetching' || data.priority == 'Repair' // No need to update
+    self.isGrabbing = ko.observable(data.status === 'Grabbing' || !parseFloat(data.mb)) // mb===0 catches paused URL-grab jobs (status 'Paused'), needed to block show-files
+    self.isFetchingBlocks = data.status === 'Fetching' || data.priority === 'Repair' // No need to update
     self.totalMB = ko.observable(parseFloat(data.mb));
     self.remainingMB = ko.observable(parseFloat(data.mbleft))
     self.missingMB = ko.observable(parseFloat(data.mbmissing))
@@ -491,7 +565,7 @@ function QueueModel(parent, data) {
     self.priority = ko.observable(parent.priorityName[data.priority]);
     self.script = ko.observable(data.script);
     self.unpackopts = ko.observable(parseInt(data.unpackopts)) // UnpackOpts fails if not parseInt'd!
-    self.pausedStatus = ko.observable(data.status == 'Paused');
+    self.pausedStatus = ko.observable(data.status === 'Paused');
     self.timeLeft = ko.observable(data.timeleft);
 
     // Initially empty
@@ -502,7 +576,7 @@ function QueueModel(parent, data) {
     // Color of the progress bar
     self.progressColor = ko.computed(function() {
         // Checking
-        if(self.status() == 'Checking') {
+        if(self.status() === 'Checking') {
             return '#58A9FA'
         }
         // Check for missing data, the value is arbitrary! (2%)
@@ -510,7 +584,7 @@ function QueueModel(parent, data) {
             return '#F8A34E'
         }
         // Set to grey, only when not Force download
-        if((self.parent.parent.downloadsPaused() && self.priority() != 2) || self.pausedStatus()) {
+        if((self.parent.parent.downloadsPaused() && self.priority() !== 2) || self.pausedStatus()) {
             return '#B7B7B7'
         }
         // Nothing
@@ -519,6 +593,9 @@ function QueueModel(parent, data) {
 
     // MB's
     self.progressText = ko.pureComputed(function() {
+        if(self.isGrabbing()) {
+            return glitterTranslate.fetchingURL
+        }
         return (self.totalMB() - self.remainingMB()).toFixed(0) + " MB / " + (self.totalMB() * 1).toFixed(0) + " MB";
     })
 
@@ -538,15 +615,15 @@ function QueueModel(parent, data) {
     })
     self.statusText = ko.computed(function() {
         // Checking
-        if(self.status() == 'Checking') {
+        if(self.status() === 'Checking') {
             return glitterTranslate.checking
         }
         // Grabbing
-        if(self.status() == 'Grabbing') {
+        if(self.status() === 'Grabbing') {
             return glitterTranslate.fetch
         }
         // Pausing status
-        if((self.parent.parent.downloadsPaused() && self.priority() != 2) || self.pausedStatus()) {
+        if((self.parent.parent.downloadsPaused() && self.priority() !== 2) || self.pausedStatus()) {
             return glitterTranslate.paused;
         }
         // Just the time
@@ -556,7 +633,7 @@ function QueueModel(parent, data) {
     // Icon to better show force-priority
     self.queueIcon = ko.computed(function() {
         // Force comes first
-        if(self.priority() == 2) {
+        if(self.priority() === 2) {
             return 'glyphicon-forward'
         }
         if(self.pausedStatus()) {
@@ -570,17 +647,17 @@ function QueueModel(parent, data) {
         switch(param) {
             case 'category':
                 // Exception for *
-                if(self.category() == "*")
+                if(self.category() === "*")
                     return glitterTranslate.defaultText
                 return self.category();
             case 'priority':
                 // Onload-exception
-                if(self.priority() == undefined) return;
-                return ko.utils.arrayFirst(self.parent.priorityOptions(), function(item) { return item.value == self.priority()}).name;
+                if(self.priority() === undefined) return;
+                return ko.utils.arrayFirst(self.parent.priorityOptions(), function(item) { return item.value === self.priority()}).name;
             case 'processing':
                 // Onload-exception
-                if(self.unpackopts() == undefined) return;
-                return ko.utils.arrayFirst(self.parent.processingOptions(), function(item) { return item.value == self.unpackopts()}).name;
+                if(self.unpackopts() === undefined) return;
+                return ko.utils.arrayFirst(self.parent.processingOptions(), function(item) { return item.value === self.unpackopts()}).name;
             case 'scripts':
                 return self.script();
             case 'age':
@@ -596,7 +673,7 @@ function QueueModel(parent, data) {
         self.password(data.password);
         self.index(data.index);
         self.status(data.status)
-        self.isGrabbing(data.status == 'Grabbing' || data.avg_age == '-')
+        self.isGrabbing(data.status === 'Grabbing' || !parseFloat(data.mb))
         self.totalMB(parseFloat(data.mb));
         self.remainingMB(parseFloat(data.mbleft));
         self.missingMB(parseFloat(data.mbmissing))
@@ -607,12 +684,12 @@ function QueueModel(parent, data) {
         self.priority(parent.priorityName[data.priority]);
         self.script(data.script);
         self.unpackopts(parseInt(data.unpackopts)) // UnpackOpts fails if not parseInt'd!
-        self.pausedStatus(data.status == 'Paused');
+        self.pausedStatus(data.status === 'Paused');
         self.timeLeft(data.timeleft);
 
         // Did the label-list change?
         // Otherwise KO will send updates to all texts during refresh()
-        if(self.rawLabels != data.labels.toString()) {
+        if(self.rawLabels !== data.labels.toString()) {
             // Update
             self.labels(data.labels);
             self.rawLabels = data.labels.toString();
@@ -637,9 +714,37 @@ function QueueModel(parent, data) {
         self.editingName(true)
         self.nameForEdit(self.name())
 
-        // Select
-        $(event.target).parents('.name').find('input').select()
-    }
+        // Select the input
+        const $input = $(event.target).parents('.name').find('input');
+        $input.select();
+
+        // Add Tab/Shift+Tab navigation
+        $input.off('keydown.tabnav').on('keydown.tabnav', function (e) {
+            if (e.key === 'Tab') {
+                e.preventDefault();
+
+                // Find all rename inputs that are currently visible
+                const inputs = $('.queue-table input[type="text"]');
+                const currentIndex = inputs.index(this);
+                let nextIndex = e.shiftKey ? currentIndex - 1 : currentIndex + 1;
+
+                // Wrap around
+                if (nextIndex >= inputs.length) nextIndex = 0;
+                if (nextIndex < 0) nextIndex = inputs.length - 1;
+
+                // Simulate clicking Rename on the next row
+                const $nextRow = inputs.eq(nextIndex).closest('tr');
+                $nextRow.find('.hover-button[title="Rename"]').click();
+
+                // Delay focusing to wait for new input to appear
+                setTimeout(() => {
+                    const $nextInput = $('.queue-table input[type="text"]').eq(nextIndex);
+                    $nextInput.focus().select();
+                }, 50);
+            }
+        });
+    };
+
 
     // Catch the submit action
     self.editingNameSubmit = function() {
@@ -649,7 +754,7 @@ function QueueModel(parent, data) {
     // Do on change
     self.nameForEdit.subscribe(function(newName) {
         // Anything change or empty?
-        if(!newName || self.name() == newName) return;
+        if(!newName || self.name() === newName) return;
 
         // Rename would abort Direct Unpack, so ask if user is sure
         if(self.direct_unpack() && !confirm(glitterTranslate.renameAbort)) return;
@@ -681,41 +786,39 @@ function QueueModel(parent, data) {
     }
 
     // Change of settings
-    self.changeCat = function(item, event) {
+    self.changeCat = function() {
         callAPI({
             mode: 'change_cat',
-            value: item.id,
-            value2: item.category()
+            value: self.id,
+            value2: self.category()
         }).then(function() {
             // Hide all tooltips before we refresh
             $('.queue-item-settings li').filter('[data-tooltip="true"]').tooltip('hide')
             self.parent.parent.refresh()
         })
     }
-    self.changeScript = function(item) {
-        // Not on empty handlers
-        if(!item.script() || parent.scriptsList().length <= 1) return;
+    self.changeScript = function() {
         callAPI({
             mode: 'change_script',
-            value: item.id,
-            value2: item.script()
+            value: self.id,
+            value2: self.script()
         })
     }
-    self.changeProcessing = function(item) {
+    self.changeProcessing = function() {
         callAPI({
             mode: 'change_opts',
-            value: item.id,
-            value2: item.unpackopts()
+            value: self.id,
+            value2: self.unpackopts()
         })
     }
-    self.changePriority = function(item, event) {
+    self.changePriority = function() {
         // Not if we are fetching extra blocks for repair!
-        if(item.isFetchingBlocks) return
+        if(self.isFetchingBlocks) return
         callAPI({
             mode: 'queue',
             name: 'priority',
-            value: item.id,
-            value2: item.priority()
+            value: self.id,
+            value2: self.priority()
         }).then(function() {
             // Hide all tooltips before we refresh
             $('.queue-item-settings li').filter('[data-tooltip="true"]').tooltip('hide')
@@ -723,29 +826,5 @@ function QueueModel(parent, data) {
         })
     }
 
-    // Remove 1 download from queue
-    self.removeDownload = function(item, event) {
-        // Confirm and remove
-        if(!self.parent.parent.confirmDeleteQueue() || confirm(glitterTranslate.deleteMsg + ":\n" + item.name() + "\n\n" + glitterTranslate.removeDow1)) {
-            var itemToDelete = this;
 
-            // Show notification
-            showNotification('.main-notification-box-removing')
-
-            callAPI({
-                mode: 'queue',
-                name: 'delete',
-                del_files: 1,
-                value: item.id
-            }).then(function(response) {
-                // Make sure no flickering (if there are more items left) and then remove
-                self.parent.isLoading(self.parent.totalItems() > 1)
-                parent.queueItems.remove(itemToDelete);
-                parent.multiEditItems.remove(function(inList) { return inList.id == itemToDelete.id; })
-                self.parent.parent.refresh();
-                // Hide notifcation
-                hideNotification()
-            });
-        }
-    };
 }

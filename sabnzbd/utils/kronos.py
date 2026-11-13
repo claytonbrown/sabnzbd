@@ -249,7 +249,11 @@ class Scheduler:
 
     def cancel(self, task):
         """Cancel given scheduled task."""
-        self.sched.cancel(task.event)
+        try:
+            self.sched.cancel(task.event)
+        except ValueError:
+            # Ignore if the task was already removed from the queue
+            pass
 
     def _getqueuetoptime(self):
         try:
@@ -300,7 +304,7 @@ class Task:
         self.action(*self.args, **self.kw)
 
     def handle_exception(self, exc):
-        """Handle any exception that occured during task execution."""
+        """Handle any exception that occurred during task execution."""
         logging.error("Error during scheduler execution: %s" % str(exc), exc_info=True)
 
 
@@ -414,7 +418,7 @@ class ThreadedScheduler(Scheduler):
     def start(self):
         """Splice off a thread in which the scheduler will run."""
         self.thread = threading.Thread(target=self._run)
-        self.thread.deamon = True
+        self.thread.daemon = True
         self.thread.start()
 
     def stop(self):

@@ -7,17 +7,17 @@ strict:
 stages:
   - name: history format empty
     request:
-      url: http://{SAB_HOST}:{SAB_PORT}/sabnzbd/api
+      url: http://{SAB_HOST}:{SAB_PORT}/api
       method: GET
       params:
         mode: history
         apikey: "{SAB_APIKEY}"
-        output: json
     response:
       status_code: 200
       headers:
         content-type: !re_match "application/json"
         content-type: !re_search "charset=(UTF|utf)-8"
+        cache-control: "no-store"
         pragma: "no-cache"
         access-control-allow-origin: "*"
       json:
@@ -29,38 +29,9 @@ stages:
           day_size: !re_match "[0-9][0-9.]*.?(\ [A-Z])?"
           slots: []
           noofslots: 0
+          ppslots: 0
           last_history_update: !anyint
           version: "{SAB_VERSION}"
-
-
----
-test_name: Check empty history format (text output)
-
-stages:
-  - name: history format empty
-    request:
-      url: http://{SAB_HOST}:{SAB_PORT}/sabnzbd/api
-      method: GET
-      params:
-        mode: history
-        apikey: "{SAB_APIKEY}"
-        output: text
-    response:
-      status_code: 200
-      headers:
-        content-type: !re_match "text/plain"
-        content-type: !re_search "charset=(UTF|utf)-8"
-        pragma: "no-cache"
-        access-control-allow-origin: "*"
-        content-length: !re_match "[0-9]+"
-      verify_response_with:
-        function: tavern.testutils.helpers:validate_regex
-        extra_kwargs:
-          # Verify response with a regex using positive looksaheads so
-          # parameters match regardless of their order of appearance
-          expression: "^{{(?=.*'noofslots': 0)(?=.*'last_history_update': [0-9]+)(?=.*'total_size': '[0-9][0-9.]*.?(\ [A-Z])?')(?=.*'month_size': '[0-9][0-9.]*.?(\ [A-Z])?')(?=.*'week_size': '[0-9][0-9.]*.?(\ [A-Z])?')(?=.*'day_size': '[0-9][0-9.]*.?(\ [A-Z])?')(?=.*'slots': \\[\\])(?=.*'version': '{SAB_VERSION}').*}}$"
-          # minor api bug: text output appends a space to integer only values in *_size, e.g. 'day_size': '0 '
-
 
 ---
 test_name: Check empty history format (xml output)
@@ -68,7 +39,7 @@ test_name: Check empty history format (xml output)
 stages:
   - name: history format empty
     request:
-      url: http://{SAB_HOST}:{SAB_PORT}/sabnzbd/api
+      url: http://{SAB_HOST}:{SAB_PORT}/api
       method: GET
       params:
         mode: history
@@ -79,6 +50,7 @@ stages:
       headers:
         content-type: !re_match "text/xml"
         content-type: !re_search "charset=(UTF|utf)-8"
+        cache-control: "no-store"
         pragma: "no-cache"
         access-control-allow-origin: "*"
         content-length: !re_match "[0-9]+"
@@ -95,6 +67,7 @@ stages:
             <day_size>!anystr</day_size>
             <slots></slots>
             <noofslots>0</noofslots>
+            <ppslots>0</ppslots>
             <last_history_update>!anyint</last_history_update>
             <version>!anystr</version>
             </history>

@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -OO
-# Copyright 2007-2021 The SABnzbd-Team <team@sabnzbd.org>
+# Copyright 2007-2026 by The SABnzbd-Team (sabnzbd.org)
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -18,23 +18,37 @@
 """
 tests.test_decoder- Testing functions in decoder.py
 """
+
 import binascii
 import os
 import pytest
+from io import BytesIO
 
 from random import randint
 from unittest import mock
 
+import sabctools
 import sabnzbd.decoder as decoder
-from sabnzbd.nzbstuff import Article
+from sabnzbd.nzb import Article
+
+
+def uu(data: bytes):
+    """Uuencode data and insert a period if necessary"""
+    line = binascii.b2a_uu(data).rstrip(b"\n")
+
+    # Dot stuffing
+    if line.startswith(b"."):
+        return b"." + line
+
+    return line
 
 
 LINES_DATA = [os.urandom(45) for _ in range(32)]
-VALID_UU_LINES = [binascii.b2a_uu(data).rstrip(b"\n") for data in LINES_DATA]
+VALID_UU_LINES = [uu(data) for data in LINES_DATA]
 
 END_DATA = os.urandom(randint(1, 45))
 VALID_UU_END = [
-    binascii.b2a_uu(END_DATA).rstrip(b"\n"),
+    uu(END_DATA),
     b"`",
     b"end",
 ]
@@ -48,6 +62,7 @@ class TestUuDecoder:
         insert_excess_empty_lines: bool = False,
         insert_headers: bool = False,
         insert_end: bool = True,
+        insert_dot_stuffing_line: bool = False,
         begin_line: bytes = b"begin 644 My Favorite Open Source Movie.mkv",
     ):
         """Generate message parts. Part may be one of 'begin', 'middle', or 'end' for multipart
@@ -57,10 +72,10 @@ class TestUuDecoder:
         data, and the expected result of uu decoding for the generated message.
         """
         article_id = "test@host" + os.urandom(8).hex() + ".sab"
-        article = Article(article_id, randint(4321, 54321), None)
-        article.lowest_partnum = True if part in ("begin", "single") else False
         # Mock an nzf so results from hashing and filename handling can be stored
-        article.nzf = mock.Mock()
+        mock_nzf = mock.Mock()
+        article = Article(article_id, randint(4321, 54321), mock_nzf)
+        article.lowest_partnum = True if part in ("begin", "single") else False
 
         # Store the message data and the expected decoding result
         data = []
@@ -89,63 +104,78 @@ class TestUuDecoder:
             data.extend(VALID_UU_LINES[:size])
             result.extend(LINES_DATA[:size])
 
+            if insert_dot_stuffing_line:
+                data.append(uu(b"\0" * 14))
+                result.append(b"\0" * 14)
+
         if part in ("end", "single"):
             if insert_end:
                 data.extend(VALID_UU_END)
                 result.append(END_DATA)
 
         # Signal the end of the message with a dot on a line of its own
-        data.append(b".")
+        data.append(b".\r\n")
 
         # Join the data with \r\n line endings, just like we get from socket reads
         data = b"\r\n".join(data)
         # Concatenate expected result
         result = b"".join(result)
 
-        return article, data, result
+        return article, bytearray(data), result
 
-    def test_no_data(self):
-        with pytest.raises(decoder.BadUu):
-            assert decoder.decode_uu(None, None)
+    @staticmethod
+    def _response(raw_data: bytes) -> sabctools.NNTPResponse:
+        dec = sabctools.Decoder(len(raw_data))
+        reader = BytesIO(raw_data)
+        reader.readinto(dec)
+        dec.process(len(raw_data))
+        return next(dec)
 
     @pytest.mark.parametrize(
         "raw_data",
         [
-            [b""],
-            [b"\r\n\r\n"],
-            [b"f", b"o", b"o", b"b", b"a", b"r", b"\r\n"],  # Plenty of list items, but (too) few actual lines
-            [b"222 0 <artid@woteva>\r\nX-Too-Short: yup\r\n"],
+            b"222 0 <foo@bar>\r\n.\r\n",
+            b"222 0 <foo@bar>\r\n\r\n.\r\n",
+            b"222 0 <foo@bar>\r\nfoobar\r\n.\r\n",  # Plenty of list items, but (too) few actual lines
+            b"222 0 <foo@bar>\r\nX-Too-Short: yup\r\n.\r\n",
         ],
     )
     def test_short_data(self, raw_data):
+        mock_nzf = mock.Mock()
+        article = Article("foo@bar", 4321, mock_nzf)
         with pytest.raises(decoder.BadUu):
-            assert decoder.decode_uu(None, raw_data)
+            assert decoder.decode_uu(article, self._response(raw_data))
 
     @pytest.mark.parametrize(
         "raw_data",
         [
-            [b"222 0 <foo@bar>\r\n\r\n"],  # Missing altogether
-            [b"222 0 <foo@bar>\r\n\r\nbeing\r\n"],  # Typo in 'begin'
-            [b"222 0 <foo@bar>\r\n\r\nx-header: begin 644 foobar\r\n"],  # Not at start of the line
-            [b"666 0 <foo@bar>\r\nbegin\r\n"],  # No empty line + wrong response code
-            [b"OMG 0 <foo@bar>\r\nbegin\r\n"],  # No empty line + invalid response code
-            [b"222 0 <foo@bar>\r\nbegin\r\n"],  # No perms
-            [b"222 0 <foo@bar>\r\nbegin ABC DEF\r\n"],  # Permissions not octal
-            [b"222 0 <foo@bar>\r\nbegin 755\r\n"],  # No filename
-            [b"222 0 <foo@bar>\r\nbegin 644 \t \t\r\n"],  # Filename empty after stripping
+            b"222 0 <foo@bar>\r\n\r\n",  # Missing altogether
+            b"222 0 <foo@bar>\r\n\r\nbeing\r\n",  # Typo in 'begin'
+            b"222 0 <foo@bar>\r\n\r\nx-header: begin 644 foobar\r\n",  # Not at start of the line
+            b"666 0 <foo@bar>\r\nbegin\r\n",  # No empty line + wrong response code
+            b"OMG 0 <foo@bar>\r\nbegin\r\n",  # No empty line + invalid response code
+            b"222 0 <foo@bar>\r\nbegin\r\n",  # No perms
+            b"222 0 <foo@bar>\r\nbegin ABC DEF\r\n",  # Permissions not octal
+            b"222 0 <foo@bar>\r\nbegin 755\r\n",  # No filename
+            b"222 0 <foo@bar>\r\nbegin 644 \t \t\r\n",  # Filename empty after stripping
         ],
     )
     def test_missing_uu_begin(self, raw_data):
-        article = Article("foo@bar", 1234, None)
+        mock_nzf = mock.Mock()
+        article = Article("foo@bar", 1234, mock_nzf)
         article.lowest_partnum = True
         filler = b"\r\n" * 4
         with pytest.raises(decoder.BadUu):
-            assert decoder.decode_uu(article, raw_data.append(filler))
+            raw_data = bytearray(raw_data)
+            raw_data.extend(filler)
+            raw_data.extend(b".\r\n")
+            assert decoder.decode_uu(article, self._response(raw_data))
 
     @pytest.mark.parametrize("insert_empty_line", [True, False])
     @pytest.mark.parametrize("insert_excess_empty_lines", [True, False])
     @pytest.mark.parametrize("insert_headers", [True, False])
     @pytest.mark.parametrize("insert_end", [True, False])
+    @pytest.mark.parametrize("insert_dot_stuffing_line", [True, False])
     @pytest.mark.parametrize(
         "begin_line",
         [
@@ -155,13 +185,27 @@ class TestUuDecoder:
             b"begin 0755 shell.sh",
         ],
     )
-    def test_singlepart(self, insert_empty_line, insert_excess_empty_lines, insert_headers, insert_end, begin_line):
+    def test_singlepart(
+        self,
+        insert_empty_line,
+        insert_excess_empty_lines,
+        insert_headers,
+        insert_end,
+        insert_dot_stuffing_line,
+        begin_line,
+    ):
         """Test variations of a sane single part nzf with proper uu-encoded data"""
         # Generate a singlepart message
         article, raw_data, expected_result = self._generate_msg_part(
-            "single", insert_empty_line, insert_excess_empty_lines, insert_headers, insert_end, begin_line
+            "single",
+            insert_empty_line,
+            insert_excess_empty_lines,
+            insert_headers,
+            insert_end,
+            insert_dot_stuffing_line,
+            begin_line,
         )
-        assert decoder.decode_uu(article, [raw_data]) == expected_result
+        assert decoder.decode_uu(article, self._response(raw_data)) == expected_result
         assert article.nzf.filename_checked
 
     @pytest.mark.parametrize("insert_empty_line", [True, False])
@@ -172,7 +216,7 @@ class TestUuDecoder:
         decoded_data = expected_data = b""
         for part in ("begin", "middle", "middle", "end"):
             article, data, result = self._generate_msg_part(part, insert_empty_line, False, False, True)
-            decoded_data += decoder.decode_uu(article, [data])
+            decoded_data += decoder.decode_uu(article, self._response(data))
             expected_data += result
 
         # Verify results
@@ -182,13 +226,53 @@ class TestUuDecoder:
     @pytest.mark.parametrize(
         "bad_data",
         [
-            b"MI^+0E\"C^364:CQ':]DW++^$F0J)6FDG/!`]0\\(4;EG$UY5RI,3JMBNX\\8+06\r\n$(WAIVBC^",  # Trailing junk
             VALID_UU_LINES[-1][:10] + bytes("ваше здоровье", encoding="utf8") + VALID_UU_LINES[-1][-10:],  # Non-ascii
         ],
+        ids=["non_ascii"],
     )
     def test_broken_uu(self, bad_data):
-        article = Article("foo@bar", 4321, None)
+        mock_nzf = mock.Mock()
+        article = Article("foo@bar", 4321, mock_nzf)
         article.lowest_partnum = False
         filler = b"\r\n".join(VALID_UU_LINES[:4]) + b"\r\n"
         with pytest.raises(decoder.BadData):
-            assert decoder.decode_uu(article, [b"222 0 <foo@bar>\r\n" + filler + bad_data + b"\r\n"])
+            assert decoder.decode_uu(
+                article, self._response(bytearray(b"222 0 <foo@bar>\r\n" + filler + bad_data + b"\r\n.\r\n"))
+            )
+
+
+class TestYencBlockCrcs:
+    @staticmethod
+    def _response(payload: bytes, begin: int, block_size: int) -> sabctools.NNTPResponse:
+        encoded, crc = sabctools.yenc_encode(payload)
+        raw_data = (
+            b"222 0 <foo@bar>\r\n"
+            + f"=ybegin part=1 line=128 size={begin + len(payload)} name=foo.bin\r\n".encode()
+            + f"=ypart begin={begin + 1} end={begin + len(payload)}\r\n".encode()
+            + encoded
+            + f"\r\n=yend size={len(payload)} part=1 pcrc32={crc:08x}\r\n.\r\n".encode()
+        )
+        dec = sabctools.Decoder(len(raw_data))
+        dec.expect(None, block_size=block_size)
+        BytesIO(raw_data).readinto(dec)
+        dec.process(len(raw_data))
+        return next(dec)
+
+    def test_the_pieces_are_kept_on_the_article(self):
+        payload = bytes(range(256)) * 4
+        article = Article("foo@bar", 1234, mock.Mock())
+        decoder.decode_yenc(article, self._response(payload, 100, 256))
+        assert article.block_size == 256
+        assert list(article.block_crcs) == [
+            binascii.crc32(payload[:156]),
+            binascii.crc32(payload[156:412]),
+            binascii.crc32(payload[412:668]),
+            binascii.crc32(payload[668:924]),
+            binascii.crc32(payload[924:]),
+        ]
+
+    def test_without_a_block_size_there_are_none(self):
+        article = Article("foo@bar", 1234, mock.Mock())
+        decoder.decode_yenc(article, self._response(b"\x01" * 100, 0, 0))
+        assert article.block_size == 0
+        assert article.block_crcs is None

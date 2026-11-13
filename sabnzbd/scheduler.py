@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -OO
-# Copyright 2007-2021 The SABnzbd-Team <team@sabnzbd.org>
+# Copyright 2007-2026 by The SABnzbd-Team (sabnzbd.org)
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -29,7 +29,7 @@ import sabnzbd.downloader
 import sabnzbd.misc
 import sabnzbd.config as config
 import sabnzbd.cfg as cfg
-from sabnzbd.filesystem import diskspace
+from sabnzbd.filesystem import diskspace_single
 from sabnzbd.constants import LOW_PRIORITY, NORMAL_PRIORITY, HIGH_PRIORITY
 
 DAILY_RANGE = list(range(1, 8))
@@ -40,6 +40,7 @@ class Scheduler:
         self.scheduler = kronos.ThreadedScheduler()
         self.pause_end: Optional[float] = None  # Moment when pause will end
         self.resume_task: Optional[kronos.Task] = None
+        self.rss_task: Optional[kronos.Task] = None  # RSS interval task
         self.restart_scheduler = False
         self.pp_pause_event = False
         self.load_schedules()
@@ -85,10 +86,10 @@ class Scheduler:
 
             try:
                 enabled, m, h, d, action_name = schedule.split()
-            except:
+            except Exception:
                 try:
                     enabled, m, h, d, action_name, argument_list = schedule.split(None, 5)
-                except:
+                except Exception:
                     continue  # Bad schedule, ignore
 
             if argument_list:
@@ -98,7 +99,7 @@ class Scheduler:
             try:
                 m = int(m)
                 h = int(h)
-            except:
+            except Exception:
                 logging.warning(T("Bad schedule %s at %s:%s"), action_name, m, h)
                 continue
 
@@ -114,13 +115,13 @@ class Scheduler:
                 action = sabnzbd.Downloader.pause
                 arguments = []
             elif action_name == "pause_all":
-                action = sabnzbd.pause_all
+                action = sabnzbd.downloader.pause_all
                 arguments = []
             elif action_name == "shutdown":
                 action = sabnzbd.shutdown_program
                 arguments = []
             elif action_name == "restart":
-                action = sabnzbd.restart_program
+                action = restart_program
                 arguments = []
             elif action_name == "pause_post":
                 action = pp_pause
@@ -129,14 +130,16 @@ class Scheduler:
             elif action_name == "speedlimit" and arguments != []:
                 action = sabnzbd.Downloader.limit_speed
             elif action_name == "enable_server" and arguments != []:
-                action = sabnzbd.enable_server
+                action = enable_server
             elif action_name == "disable_server" and arguments != []:
-                action = sabnzbd.disable_server
+                action = disable_server
             elif action_name == "scan_folder":
                 action = sabnzbd.DirScanner.scan
             elif action_name == "rss_scan":
                 action = sabnzbd.RSSReader.run
                 rss_planned = True
+            elif action_name == "create_backup":
+                action = sabnzbd.config.create_config_backup
             elif action_name == "remove_failed":
                 action = sabnzbd.api.history_remove_failed
             elif action_name == "remove_completed":
@@ -187,38 +190,56 @@ class Scheduler:
             delay = random.randint(0, interval - 1)
             logging.info("Scheduling RSS interval task every %s min (delay=%s)", interval, delay)
             sabnzbd.RSSReader.next_run = time.time() + delay * 60
-            self.scheduler.add_interval_task(sabnzbd.RSSReader.run, "RSS", delay * 60, interval * 60)
-            self.scheduler.add_single_task(sabnzbd.RSSReader.run, "RSS", 15)
+            self.rss_task = self.scheduler.add_interval_task(sabnzbd.RSSReader.run, "RSS", delay * 60, interval * 60)
 
         if cfg.version_check():
-            # Check for new release, once per week on random time
+            # Check for new release daily at a random time
             m = random.randint(0, 59)
             h = random.randint(0, 23)
-            d = (random.randint(1, 7),)
 
-            logging.info("Scheduling VersionCheck on day %s at %s:%s", d[0], h, m)
-            self.scheduler.add_daytime_task(sabnzbd.misc.check_latest_version, "VerCheck", d, None, (h, m))
+            logging.info("Scheduling version check in 10 minutes and daily at %s:%s", h, m)
+            self.scheduler.add_single_task(sabnzbd.misc.check_latest_version, "version_check", 10 * 60)
+            self.scheduler.add_daytime_task(
+                sabnzbd.misc.check_latest_version,
+                "recurring_version_check",
+                DAILY_RANGE,
+                None,
+                (h, m),
+            )
 
         action, hour, minute = sabnzbd.BPSMeter.get_quota()
         if action:
             logging.info("Setting schedule for quota check daily at %s:%s", hour, minute)
             self.scheduler.add_daytime_task(action, "quota_reset", DAILY_RANGE, None, (hour, minute))
 
-        if sabnzbd.misc.int_conv(cfg.history_retention()) > 0:
-            logging.info("Setting schedule for midnight auto history-purge")
-            self.scheduler.add_daytime_task(
-                sabnzbd.database.midnight_history_purge, "midnight_history_purge", DAILY_RANGE, None, (0, 0)
-            )
-
-        logging.info("Setting schedule for midnight BPS reset")
-        self.scheduler.add_daytime_task(sabnzbd.BPSMeter.update, "midnight_bps", DAILY_RANGE, None, (0, 0))
-
-        logging.info("Setting schedule for server expiration check")
+        logging.info("Setting schedule for midnight auto history-purge")
         self.scheduler.add_daytime_task(
-            sabnzbd.downloader.check_server_expiration, "check_server_expiration", DAILY_RANGE, None, (0, 0)
+            sabnzbd.database.scheduled_history_purge,
+            "midnight_history_purge",
+            DAILY_RANGE,
+            None,
+            (0, 0),
         )
 
-        logging.info("Setting scheduler for server quota check")
+        logging.info("Setting schedule for midnight BPS reset")
+        self.scheduler.add_daytime_task(
+            sabnzbd.BPSMeter.update,
+            "midnight_bps",
+            DAILY_RANGE,
+            None,
+            (0, 0),
+        )
+
+        logging.info("Setting schedule for midnight server expiration check")
+        self.scheduler.add_daytime_task(
+            sabnzbd.downloader.check_server_expiration,
+            "check_server_expiration",
+            DAILY_RANGE,
+            None,
+            (0, 0),
+        )
+
+        logging.info("Setting schedule for server quota check")
         self.scheduler.add_interval_task(
             sabnzbd.downloader.check_server_quota,
             "check_server_quota",
@@ -253,7 +274,7 @@ class Scheduler:
             action = ev[1]
             try:
                 value = ev[2]
-            except:
+            except Exception:
                 value = None
             if action == "pause":
                 paused = True
@@ -290,12 +311,12 @@ class Scheduler:
             elif action == "enable_server":
                 try:
                     servers[value] = 1
-                except:
+                except Exception:
                     logging.warning(T("Schedule for non-existing server %s"), value)
             elif action == "disable_server":
                 try:
                     servers[value] = 0
-                except:
+                except Exception:
                     logging.warning(T("Schedule for non-existing server %s"), value)
 
         # Special case, a priority was passed, so evaluate only that and return state
@@ -311,12 +332,16 @@ class Scheduler:
         # Normal analysis
         if not was_paused:
             if paused_all:
-                sabnzbd.pause_all()
+                sabnzbd.downloader.pause_all()
             else:
-                sabnzbd.unpause_all()
+                sabnzbd.downloader.unpause_all()
             sabnzbd.Downloader.set_paused_state(paused or paused_all)
 
-        sabnzbd.PostProcessor.paused = pause_post
+        # Handle pause_post state with proper notification
+        if pause_post and not sabnzbd.PostProcessor.paused:
+            sabnzbd.PostProcessor.pause()
+        elif not pause_post and sabnzbd.PostProcessor.paused:
+            sabnzbd.PostProcessor.resume()
         if speedlimit is not None:
             sabnzbd.Downloader.limit_speed(speedlimit)
 
@@ -328,8 +353,8 @@ class Scheduler:
                 value = servers[serv]
                 if bool(item.enable()) != bool(value):
                     item.enable.set(value)
-                    sabnzbd.Downloader.init_server(serv, serv)
-            except:
+                    sabnzbd.Downloader.update_server(serv)
+            except Exception:
                 pass
         config.save_config()
 
@@ -340,7 +365,7 @@ class Scheduler:
     def scheduled_resume(self):
         """Scheduled resume, only when no oneshot resume is active"""
         if self.pause_end is None:
-            sabnzbd.unpause_all()
+            sabnzbd.downloader.unpause_all()
 
     def __oneshot_resume(self, when):
         """Called by delayed resume schedule
@@ -349,7 +374,7 @@ class Scheduler:
         if self.pause_end is not None and (when > self.pause_end - 5) and (when < self.pause_end + 55):
             self.pause_end = None
             logging.debug("Resume after pause-interval")
-            sabnzbd.unpause_all()
+            sabnzbd.downloader.unpause_all()
         else:
             logging.debug("Ignoring cancelled resume")
 
@@ -362,7 +387,7 @@ class Scheduler:
             sabnzbd.Downloader.pause()
         else:
             self.pause_end = None
-            sabnzbd.unpause_all()
+            sabnzbd.downloader.unpause_all()
 
     def __check_diskspace(self, full_dir: str, required_space: float):
         """Resume if there is sufficient available space"""
@@ -370,7 +395,7 @@ class Scheduler:
             self.cancel_resume_task()
             return
 
-        disk_free = diskspace(force=True)[full_dir][1]
+        disk_free = diskspace_single(full_dir).free
         if disk_free > required_space:
             logging.info("Resuming, %s has %d GB free, needed %d GB", full_dir, disk_free, required_space)
             sabnzbd.Downloader.resume()
@@ -382,7 +407,12 @@ class Scheduler:
             self.cancel_resume_task()
 
     def plan_diskspace_resume(self, full_dir: str, required_space: float):
-        """Create regular check for free disk space"""
+        """
+        Create regular check for free disk space
+
+        :param str full_dir: directory path to monitor for free space
+        :param float required_space: Disk space required to resume
+        """
         self.cancel_resume_task()
         logging.info("Will resume when %s has more than %d GB free space", full_dir, required_space)
         self.resume_task = self.scheduler.add_interval_task(
@@ -421,23 +451,22 @@ class Scheduler:
         if self.pause_end is not None and (self.pause_end - time.time()) < 0:
             self.pause_end = None
             logging.debug("Force resume, negative timer")
-            sabnzbd.unpause_all()
+            sabnzbd.downloader.unpause_all()
 
     def plan_server(self, action, parms, interval):
         """Plan to re-activate server after 'interval' minutes"""
         self.scheduler.add_single_task(action, "", interval * 60, args=parms)
 
     def force_rss(self):
-        """Add a one-time RSS scan, one second from now"""
-        self.scheduler.add_single_task(sabnzbd.RSSReader.run, "RSS", 1)
+        """Run RSS scan immediately and reschedule interval task"""
+        # Cancel the current RSS interval task
+        if self.rss_task:
+            self.scheduler.cancel(self.rss_task)
 
-
-def pp_pause():
-    sabnzbd.PostProcessor.paused = True
-
-
-def pp_resume():
-    sabnzbd.PostProcessor.paused = False
+        # Schedule a new interval task and start one now
+        interval = cfg.rss_rate() * 60  # Convert minutes to seconds
+        sabnzbd.RSSReader.next_run = time.time() + interval
+        self.rss_task = self.scheduler.add_interval_task(sabnzbd.RSSReader.run, "RSS", 0, interval)
 
 
 def sort_schedules(all_events, now=None):
@@ -460,10 +489,10 @@ def sort_schedules(all_events, now=None):
         try:
             # Note: the last parameter can have spaces (category name)!
             enabled, m, h, dd, action, parms = schedule.split(None, 5)
-        except:
+        except Exception:
             try:
                 enabled, m, h, dd, action = schedule.split(None, 4)
-            except:
+            except Exception:
                 continue  # Bad schedule, ignore
         action = action.strip()
         if dd == "*":
@@ -483,3 +512,41 @@ def sort_schedules(all_events, now=None):
 
     events.sort(key=lambda x: x[0])
     return events
+
+
+def pp_pause():
+    sabnzbd.PostProcessor.pause()
+
+
+def pp_resume():
+    sabnzbd.PostProcessor.resume()
+
+
+def enable_server(server):
+    """Enable server (scheduler only)"""
+    try:
+        config.get_config("servers", server).enable.set(1)
+    except Exception:
+        logging.warning(T("Trying to set status of non-existing server %s"), server)
+        return
+    config.save_config()
+    sabnzbd.Downloader.update_server(server)
+
+
+def disable_server(server):
+    """Disable server (scheduler only)"""
+    try:
+        config.get_config("servers", server).enable.set(0)
+    except Exception:
+        logging.warning(T("Trying to set status of non-existing server %s"), server)
+        return
+    config.save_config()
+    sabnzbd.Downloader.update_server(server)
+
+
+def restart_program():
+    """Restart program (used by scheduler)"""
+    logging.info("Scheduled restart request")
+    # Just set the stop flag, because stopping CherryPy from
+    # the scheduler is not reliable
+    sabnzbd.TRIGGER_RESTART = True

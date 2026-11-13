@@ -1,14 +1,12 @@
-ko.bindingHandlers.truncatedText = {
-    update: function(element, valueAccessor, allBindingsAccessor) {
-        var value = ko.utils.unwrapObservable(valueAccessor());
-        if (!value) return
-        var length = ko.utils.unwrapObservable(allBindingsAccessor().length) || ko.bindingHandlers.truncatedText.defaultLength,
-            truncatedValue = value.length > length ? convertHTMLtoText(value.substring(0, Math.min(value.length, length))) + "&hellip;" : convertHTMLtoText(value);
-        ko.bindingHandlers.html.update(element, function() {
-            return truncatedValue;
-        });
-    },
-    defaultLength: 15
+// Falls back to the next element (e.g. a glyphicon) when the image fails to load,
+// without an inline onerror="" attribute in the template
+ko.bindingHandlers.faviconFallback = {
+    init: function(element) {
+        element.onerror = function() {
+            this.style.display = 'none';
+            this.nextElementSibling.style.display = 'inline-block';
+        };
+    }
 };
 ko.bindingHandlers.truncatedTextCenter = {
     update: function(element, valueAccessor, allBindingsAccessor) {
@@ -33,10 +31,8 @@ ko.bindingHandlers.longText = {
         // Input is an array
         var value = ko.utils.unwrapObservable(valueAccessor())
 
-        // Convert HTML entities for all but the Script (because of the (more)-link)
-        if(allBindingsAccessor.get('longTextType') != "Script") {
-            value = value.map(convertHTMLtoText)
-        }
+        // Escape HTML in the source lines (the markup below is added afterwards)
+        value = value.map(convertHTMLtoText)
 
         // Any <br>'s?
         var outputText = '';

@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -OO
-# Copyright 2007-2021 The SABnzbd-Team <team@sabnzbd.org>
+# Copyright 2007-2026 by The SABnzbd-Team (sabnzbd.org)
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -30,8 +30,9 @@ import re
 import time
 
 from random import randint
+from typing import Optional
 
-import sabyenc3
+import sabctools
 
 logging.getLogger().setLevel(logging.INFO)
 
@@ -45,32 +46,38 @@ ARTICLE_INFO = re.compile(
 YENC_ESCAPE = [0x00, 0x0A, 0x0D, ord("="), ord(".")]
 
 
-class NewsServerProtocol(asyncio.Protocol):
-    def __init__(self):
-        self.transport = None
-        self.connected = False
-        self.in_article = False
-        super().__init__()
+class NewsServerSession:
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        self.reader = reader
+        self.writer = writer
 
-    def connection_made(self, transport):
-        logging.info("Connection from %s", transport.get_extra_info("peername"))
-        self.transport = transport
-        self.connected = True
-        self.transport.write(b"200 Welcome (SABNews)\r\n")
+    async def run(self):
+        self.writer.write(b"200 Welcome (SABNews)\r\n")
+        await self.writer.drain()
 
-    def data_received(self, message):
-        logging.debug("Data received: %s", message.strip())
+        try:
+            while not self.reader.at_eof():
+                message = await self.reader.readuntil(b"\r\n")
+                logging.debug("Data received: %s", message.strip())
+                await self.handle_command(message)
+        except (ConnectionResetError, asyncio.IncompleteReadError):
+            logging.debug("Client closed connection")
 
-        # Handle basic commands
+    async def handle_command(self, message: bytes):
+        """Handle basic NNTP commands, \r\n is already stripped."""
         if message.startswith(b"QUIT"):
-            self.close_connection()
-        elif message.startswith((b"ARTICLE", b"BODY")):
+            await self.close_connection()
+            return
+
+        if message.startswith((b"ARTICLE", b"BODY")):
             parsed_message = ARTICLE_INFO.search(message)
-            self.serve_article(parsed_message)
+            await self.serve_article(parsed_message)
+            return
 
-        # self.transport.write(data)
+        self.writer.write(b"500 Unknown command\r\n")
+        await self.writer.drain()
 
-    def serve_article(self, parsed_message):
+    async def serve_article(self, parsed_message):
         # Check if we parsed everything
         try:
             message_id = parsed_message.group("message_id")
@@ -81,83 +88,106 @@ class NewsServerProtocol(asyncio.Protocol):
             size = int(parsed_message.group("size"))
         except (AttributeError, ValueError):
             logging.warning("Can't parse article information")
-            self.transport.write(b"430 No Such Article Found (bad message-id)\r\n")
+            self.writer.write(b"430 No Such Article Found (bad message-id)\r\n")
+            await self.writer.drain()
             return
 
         # Check if file exists
         if not os.path.exists(file):
             logging.warning("File not found: %s", file)
-            self.transport.write(b"430 No Such Article Found (no file on disk)\r\n")
+            self.writer.write(b"430 No Such Article Found (no file on disk)\r\n")
+            await self.writer.drain()
             return
 
         # Check if sizes are valid
         file_size = os.path.getsize(file)
         if start + size > file_size:
             logging.warning("Invalid start/size attributes")
-            self.transport.write(b"430 No Such Article Found (invalid start/size attributes)\r\n")
+            self.writer.write(b"430 No Such Article Found (invalid start/size attributes)\r\n")
+            await self.writer.drain()
             return
 
         logging.debug("Serving %s" % message_id)
 
         # File is found, send headers
-        self.transport.write(b"222 0 %s\r\n" % message_id)
-        self.transport.write(b"Message-ID: %s\r\n" % message_id)
-        self.transport.write(b'Subject: "%s"\r\n\r\n' % file_base.encode("utf-8"))
+        self.writer.write(b"222 0 %s\r\n" % message_id)
+        self.writer.write(b"Message-ID: %s\r\n" % message_id)
+        self.writer.write(b'Subject: "%s"\r\n\r\n' % file_base.encode("utf-8"))
 
         # Write yEnc headers
-        self.transport.write(
+        self.writer.write(
             b"=ybegin part=%d line=128 size=%d name=%s\r\n" % (part, file_size, file_base.encode("utf-8"))
         )
-        self.transport.write(b"=ypart begin=%d end=%d\r\n" % (start + 1, start + size))
+        self.writer.write(b"=ypart begin=%d end=%d\r\n" % (start + 1, start + size))
 
         with open(file, "rb") as inp_file:
             inp_file.seek(start)
             inp_buffer = inp_file.read(size)
 
         # Encode data
-        output_string, crc = sabyenc3.encode(inp_buffer)
-        self.transport.write(output_string)
+        output_string, crc = sabctools.yenc_encode(inp_buffer)
+        self.writer.write(output_string)
 
         # Write footer
-        self.transport.write(b"\r\n=yend size=%d part=%d pcrc32=%08x\r\n" % (size, part, crc))
-        self.transport.write(b".\r\n")
+        self.writer.write(b"\r\n=yend size=%d part=%d pcrc32=%08x\r\n" % (size, part, crc))
+        self.writer.write(b".\r\n")
+        await self.writer.drain()
 
-    def close_connection(self):
+    async def close_connection(self):
         logging.debug("Closing connection")
-        self.transport.write(b"205 Connection closing\r\n")
-        self.transport.close()
+        self.writer.write(b"205 Connection closing\r\n")
+        await self.writer.drain()
+        self.writer.close()
+        await self.writer.wait_closed()
+
+
+async def connection_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    session = NewsServerSession(reader, writer)
+    await session.run()
 
 
 async def serve_sabnews(hostname, port):
     # Start server
     logging.info("Starting SABNews on %s:%d", hostname, port)
 
-    # Needed for Python 3.5 support!
-    loop = asyncio.get_event_loop()
-    server = await loop.create_server(lambda: NewsServerProtocol(), hostname, port)
-    return server
+    server = await asyncio.start_server(connection_handler, hostname, port)
+    async with server:
+        await server.serve_forever()
 
 
-def create_nzb(nzb_file=None, nzb_dir=None, metadata=None):
+def create_nzb(
+    nzb_file: Optional[str] = None,
+    nzb_dir: Optional[str] = None,
+    metadata: Optional[dict[str, str]] = None,
+    output_file: Optional[str] = None,
+):
+    """Create an NZB from a directory or a single file.
+    Pass output_file to write it somewhere other than next to the input, so callers that
+    share an input directory do not have to share the output file as well.
+    """
     article_size = 500000
     files_for_nzb = []
-    output_file = ""
+    default_output_file = ""
 
     # Either use directory or single file
     if nzb_dir:
+        nzb_dir = os.path.normpath(nzb_dir)
         if not os.path.exists(nzb_dir) or not os.path.isdir(nzb_dir):
             raise NotADirectoryError("%s is not a valid directory" % nzb_dir)
 
-        # List all files
+        # List all files, but never an NZB: that is what we are creating here, so it is
+        # either one we made earlier or one another test is busy with right now
         files_for_nzb = [os.path.join(nzb_dir, fl) for fl in os.listdir(nzb_dir)]
-        files_for_nzb = [fl for fl in files_for_nzb if os.path.isfile(fl)]
-        output_file = os.path.join(nzb_dir, os.path.basename(os.path.normpath(nzb_dir)) + ".nzb")
+        files_for_nzb = [fl for fl in files_for_nzb if os.path.isfile(fl) and not fl.endswith(".nzb")]
+        default_output_file = os.path.join(nzb_dir, os.path.basename(os.path.normpath(nzb_dir)) + ".nzb")
 
     if nzb_file:
         if not os.path.exists(nzb_file) or not os.path.isfile(nzb_file):
             raise FileNotFoundError("Cannot find %s or it is not a file" % nzb_file)
         files_for_nzb = [nzb_file]
-        output_file = os.path.splitext(nzb_file)[0] + ".nzb"
+        default_output_file = os.path.splitext(nzb_file)[0] + ".nzb"
+
+    output_file = output_file or default_output_file
 
     if not files_for_nzb:
         raise RuntimeError("No files found to include in NZB")
@@ -208,9 +238,7 @@ def main():
 
     # Serve if we are not creating NZB's
     if not args.nzb_file and not args.nzb_dir:
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(serve_sabnews(args.hostname, args.port))
-        loop.run_forever()
+        asyncio.run(serve_sabnews(args.hostname, args.port))
     else:
         create_nzb(args.nzb_file, args.nzb_dir)
 

@@ -1,32 +1,21 @@
 <!--#set global $pane="Switches"#-->
-<!--#set global $help_uri="configuration/3.5/switches"#-->
+<!--#set global $help_uri = $confighelpuri + "switches"#-->
 <!--#include $webdir + "/_inc_header_uc.tmpl"#-->
 
 <div class="colmask">
     <div class="padding alt section">
-        <label for="advanced-settings-button" class="form-control advanced-button ">
+        <label for="advanced-settings-button" class="form-control bar-button advanced-button">
             <input type="checkbox" id="advanced-settings-button" name="advanced-settings-button"> $T('button-advanced')
         </label>
     </div>
-    <form action="saveSwitches" method="post" name="fullform" class="fullform" autocomplete="off">
-        <input type="hidden" id="apikey" name="apikey" value="$apikey" />
-        <input type="hidden" id="ajax" name="ajax" value="1" />
+    <form action="$url('config/switches/save')" method="post" class="fullform" autocomplete="off">
         <input type="hidden" name="output" value="json" />
         <div class="section advanced-settings">
             <div class="col2">
-                <h3>$T('swtag-server') <a href="$helpuri$help_uri#toc1" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a></h3>
+                <h3>$T('swtag-server') <a href="$help_uri#toc1" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a></h3>
             </div><!-- /col2 -->
             <div class="col1">
                 <fieldset>
-                    <div class="field-pair">
-                        <label class="config" for="load_balancing">$T('opt-load_balancing')</label>
-                        <select name="load_balancing" id="load_balancing">
-                            <option value="0" <!--#if $load_balancing == 0 then 'selected="selected"' else ""#--> >$T('no-load-balancing')</option>
-                            <option value="1" <!--#if $load_balancing == 1 then 'selected="selected"' else ""#--> >$T('load-balancing')</option>
-                            <option value="2" <!--#if $load_balancing == 2 then 'selected="selected"' else ""#--> >$T('load-balancing-happy-eyeballs')</option>
-                        </select>
-                        <span class="desc">$T('explain-load_balancing')</span>
-                    </div>
                     <div class="field-pair">
                         <label class="config" for="max_art_tries">$T('opt-max_art_tries')</label>
                         <input type="number" name="max_art_tries" id="max_art_tries" value="$max_art_tries" min="2" max="2000" />
@@ -46,11 +35,11 @@
         </div><!-- /section -->
         <div class="section">
             <div class="col2">
-                <h3>$T('swtag-queue') <a href="$helpuri$help_uri#toc2" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a></h3>
+                <h3>$T('swtag-queue') <a href="$help_uri#toc2" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a></h3>
             </div><!-- /col2 -->
             <div class="col1">
                 <fieldset>
-                    <div class="field-pair">
+                    <div class="field-pair advanced-settings">
                         <label class="config" for="pre_script">$T('opt-pre_script')</label>
                         <select name="pre_script" id="pre_script">
                         <!--#for $sc in $scripts#-->
@@ -63,9 +52,22 @@
                         </select>
                         <span class="desc">$T('explain-pre_script')</span>
                     </div>
+                    <div class="field-pair advanced-settings">
+                        <label class="config" for="end_queue_script">$T('opt-end_queue_script')</label>
+                        <select name="end_queue_script" id="end_queue_script">
+                        <!--#for $sc in $scripts#-->
+                            <!--#if $sc.lower() == $end_queue_script.lower()#-->
+                                <option value="$sc" selected="selected">$Tspec($sc)</option>
+                            <!--#else#-->
+                                <option value="$sc">$Tspec($sc)</option>
+                            <!--#end if#-->
+                        <!--#end for#-->
+                        </select>
+                        <span class="desc">$T('explain-end_queue_script')</span>
+                    </div>
                     <div class="field-pair">
                         <label class="config" for="propagation_delay">$T('opt-propagation_delay')</label>
-                        <input type="number" name="propagation_delay" id="propagation_delay" value="$propagation_delay" /> <i>$T('minutes')</i>
+                        <input type="number" name="propagation_delay" id="propagation_delay" value="$propagation_delay" min="0" /> <i>$T('minutes')</i>
                         <span class="desc">$T('explain-propagation_delay')</span>
                     </div>
                     <div class="field-pair advanced-settings">
@@ -89,33 +91,39 @@
                             <option value="0" <!--#if int($no_dupes) == 0 then 'selected="selected"' else ""#--> >$T('nodupes-off')</option>
                             <option value="4" <!--#if int($no_dupes) == 4 then 'selected="selected"' else ""#--> >$T('nodupes-tag')</option>
                             <option value="2" <!--#if int($no_dupes) == 2 then 'selected="selected"' else ""#--> >$T('nodupes-pause')</option>
-                            <option value="3" <!--#if int($no_dupes) == 3 then 'selected="selected"' else ""#--> >$T('nodupes-fail')</option>
+                            <option value="3" <!--#if int($no_dupes) == 3 then 'selected="selected"' else ""#--> >$T('fail-to-history')</option>
                             <option value="1" <!--#if int($no_dupes) == 1 then 'selected="selected"' else ""#--> >$T('nodupes-ignore')</option>
                         </select>
-                        <span class="desc">$T('explain-no_dupes')</span>
+                        <span class="desc">
+                            $T('explain-no_dupes')<br>
+                            <a href="https://sabnzbd.org/wiki/duplicate-detection" target="_blank">https://sabnzbd.org/wiki/duplicate-detection</a>
+                        </span>
                     </div>
                     <div class="field-pair">
-                        <label class="config" for="no_series_dupes">$T('opt-no_series_dupes')</label>
-                        <select name="no_series_dupes" id="no_series_dupes">
-                            <option value="0" <!--#if int($no_series_dupes) == 0 then 'selected="selected"' else ""#--> >$T('nodupes-off')</option>
-                            <option value="4" <!--#if int($no_series_dupes) == 4 then 'selected="selected"' else ""#--> >$T('nodupes-tag')</option>
-                            <option value="2" <!--#if int($no_series_dupes) == 2 then 'selected="selected"' else ""#--> >$T('nodupes-pause')</option>
-                            <option value="3" <!--#if int($no_series_dupes) == 3 then 'selected="selected"' else ""#--> >$T('nodupes-fail')</option>
-                            <option value="1" <!--#if int($no_series_dupes) == 1 then 'selected="selected"' else ""#--> >$T('nodupes-ignore')</option>
+                        <label class="config" for="no_smart_dupes">$T('opt-no_smart_dupes')</label>
+                        <select name="no_smart_dupes" id="no_smart_dupes">
+                            <option value="0" <!--#if int($no_smart_dupes) == 0 then 'selected="selected"' else ""#--> >$T('nodupes-off')</option>
+                            <option value="4" <!--#if int($no_smart_dupes) == 4 then 'selected="selected"' else ""#--> >$T('nodupes-tag')</option>
+                            <option value="2" <!--#if int($no_smart_dupes) == 2 then 'selected="selected"' else ""#--> >$T('nodupes-pause')</option>
+                            <option value="3" <!--#if int($no_smart_dupes) == 3 then 'selected="selected"' else ""#--> >$T('fail-to-history')</option>
+                            <option value="1" <!--#if int($no_smart_dupes) == 1 then 'selected="selected"' else ""#--> >$T('nodupes-ignore')</option>
                         </select>
-                        <span class="desc">$T('explain-no_series_dupes')</span>
+                        <span class="desc">
+                            $T('explain-no_smart_dupes')<br>
+                            <a href="https://sabnzbd.org/wiki/duplicate-detection" target="_blank">https://sabnzbd.org/wiki/duplicate-detection</a>
+                        </span>
                     </div>
                     <div class="field-pair advanced-settings">
-                        <label class="config" for="series_propercheck">$T('opt-series_propercheck')</label>
-                        <input type="checkbox" name="series_propercheck" id="series_propercheck" value="1" <!--#if int($series_propercheck) > 0 then 'checked="checked"' else ""#--> />
-                        <span class="desc">$T('explain-series_propercheck')</span>
+                        <label class="config" for="dupes_propercheck">$T('opt-dupes_propercheck')</label>
+                        <input type="checkbox" name="dupes_propercheck" id="dupes_propercheck" value="1" <!--#if int($dupes_propercheck) > 0 then 'checked="checked"' else ""#--> />
+                        <span class="desc">$T('explain-dupes_propercheck')</span>
                     </div>
                     <div class="field-pair">
                         <label class="config" for="pause_on_pwrar">$T('opt-pause_on_pwrar')</label>
                         <select name="pause_on_pwrar" id="pause_on_pwrar">
                             <option value="0" <!--#if int($pause_on_pwrar) == 0 then 'selected="selected"' else ""#--> >$T('nodupes-off')</option>
                             <option value="1" <!--#if int($pause_on_pwrar) == 1 then 'selected="selected"' else ""#--> >$T('nodupes-pause')</option>
-                            <option value="2" <!--#if int($pause_on_pwrar) == 2 then 'selected="selected"' else ""#--> >$T('abort')</option>
+                            <option value="2" <!--#if int($pause_on_pwrar) == 2 then 'selected="selected"' else ""#--> >$T('fail-to-history')</option>
                         </select>
                         <span class="desc">$T('explain-pause_on_pwrar')</span>
                     </div>
@@ -133,7 +141,7 @@
                         <select name="action_on_unwanted_extensions" id="action_on_unwanted_extensions">
                             <option value="0" <!--#if int($action_on_unwanted_extensions) == 0 then 'selected="selected"' else ""#--> >$T('nodupes-off')</option>
                             <option value="1" <!--#if int($action_on_unwanted_extensions) == 1 then 'selected="selected"' else ""#--> >$T('nodupes-pause')</option>
-                            <option value="2" <!--#if int($action_on_unwanted_extensions) == 2 then 'selected="selected"' else ""#--> >$T('abort')</option>
+                            <option value="2" <!--#if int($action_on_unwanted_extensions) == 2 then 'selected="selected"' else ""#--> >$T('fail-to-history')</option>
                         </select>
                         <span class="desc">$T('explain-action_on_unwanted_extensions')</span>
                     </div>
@@ -141,6 +149,8 @@
                         <label class="config" for="auto_sort">$T('opt-auto_sort')</label>
                         <select name="auto_sort" id="auto_sort">
                             <option value="">$T('default')</option>
+                            <option value="remaining asc" <!--#if $auto_sort == "remaining asc" then 'selected="selected"' else ""#--> >$T('Glitter-sortRemaining')</option>
+                            <option value="remaining_bytes asc" <!--#if $auto_sort == "remaining_bytes asc" then 'selected="selected"' else ""#--> >$T('Glitter-sortRemainingBytesAsc')</option>
                             <option value="avg_age desc" <!--#if $auto_sort == "avg_age desc" then 'selected="selected"' else ""#--> >$T('Glitter-sortAgeAsc')</option>
                             <option value="avg_age asc" <!--#if $auto_sort == "avg_age asc" then 'selected="selected"' else ""#--> >$T('Glitter-sortAgeDesc')</option>
                             <option value="name asc" <!--#if $auto_sort == "name asc" then 'selected="selected"' else ""#--> >$T('Glitter-sortNameAsc')</option>
@@ -148,7 +158,7 @@
                             <option value="size asc" <!--#if $auto_sort == "size asc" then 'selected="selected"' else ""#--> >$T('Glitter-sortSizeAsc')</option>
                             <option value="size desc" <!--#if $auto_sort == "size desc" then 'selected="selected"' else ""#--> >$T('Glitter-sortSizeDesc')</option>
                         </select>
-                        <span class="desc">$T('explain-auto_sort')</span>
+                        <span class="desc">$T('explain-auto_sort') $T('explain-auto_sort_remaining')</span>
                     </div>
                     <div class="field-pair">
                         <label class="config" for="direct_unpack">$T('opt-direct_unpack')</label>
@@ -164,7 +174,7 @@
         </div><!-- /section -->
         <div class="section">
             <div class="col2">
-                <h3>$T('swtag-pp') <a href="$helpuri$help_uri#toc3" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a></h3>
+                <h3>$T('swtag-pp') <a href="$help_uri#toc3" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a></h3>
             </div><!-- /col2 -->
             <div class="col1">
                 <fieldset>
@@ -178,16 +188,16 @@
                         <input type="checkbox" name="enable_all_par" id="enable_all_par" value="1" <!--#if int($enable_all_par) > 0 then 'checked="checked"' else ""#--> />
                         <span class="desc">$T('explain-enable_all_par').replace('. ', '.<br/>')</span>
                     </div>
-                    <!--#if not $nt#-->
+                    <!--#if not $windows#-->
                     <div class="field-pair advanced-settings <!--#if not $have_nice then "disabled" else "" #-->">
                         <label class="config" for="nice">$T('opt-nice')</label>
                         <input type="text" name="nice" id="nice" value="$nice" <!--#if not $have_nice then 'readonly="readonly" disabled="disabled"' else "" #--> />
-                        <span class="desc">$T('explain-nice')</span>
+                        <span class="desc">$T('readwiki')</span>
                     </div>
                     <div class="field-pair advanced-settings <!--#if not $have_ionice then "disabled" else "" #-->">
                         <label class="config" for="ionice">$T('opt-ionice')</label>
                         <input type="text" name="ionice" id="ionice" value="$ionice" <!--#if not $have_ionice then 'readonly="readonly" disabled="disabled"' else "" #--> />
-                        <span class="desc">$T('explain-ionice')</span>
+                        <span class="desc">$T('readwiki')</span>
                     </div>
                     <!--#else#-->
                     <div class="field-pair advanced-settings">
@@ -199,14 +209,9 @@
                             <option value="2" <!--#if int($win_process_prio) == 2 then 'selected="selected"' else ""#-->>$T('win_process_prio-low')</option>
                             <option value="1" <!--#if int($win_process_prio) == 1 then 'selected="selected"' else ""#-->>$T('win_process_prio-idle')</option>
                         </select>
-                        <span class="desc">$T('explain-win_process_prio')</span>
+                        <span class="desc">$T('readwiki')</span>
                     </div>
                     <!--#end if#-->
-                    <div class="field-pair advanced-settings">
-                        <label class="config" for="par_option">$T('opt-par_option')</label>
-                        <input type="text" name="par_option" id="par_option" value="$par_option" />
-                        <span class="desc">$T('explain-par_option')</span>
-                    </div>
                     <div class="field-pair advanced-settings">
                         <label class="config" for="sfv_check">$T('opt-sfv_check')</label>
                         <input type="checkbox" name="sfv_check" id="sfv_check" value="1" <!--#if int($sfv_check) > 0 then 'checked="checked"' else ""#--> />
@@ -232,11 +237,6 @@
                         <input type="checkbox" name="script_can_fail" id="script_can_fail" value="1" <!--#if int($script_can_fail) > 0 then 'checked="checked"' else ""#--> />
                         <span class="desc">$T('explain-script_can_fail')</span>
                     </div>
-                    <div class="field-pair advanced-settings">
-                        <label class="config" for="new_nzb_on_failure">$T('opt-new_nzb_on_failure')</label>
-                        <input type="checkbox" name="new_nzb_on_failure" id="new_nzb_on_failure" value="1" <!--#if int($new_nzb_on_failure) > 0 then 'checked="checked"' else ""#--> />
-                        <span class="desc">$T('explain-new_nzb_on_failure')</span>
-                    </div>
                     <div class="field-pair">
                         <label class="config" for="ignore_samples">$T('opt-ignore_samples')</label>
                         <input type="checkbox" name="ignore_samples" id="ignore_samples" value="1" <!--#if int($ignore_samples) > 0 then 'checked="checked"' else ""#--> />
@@ -247,27 +247,23 @@
                         <input type="checkbox" name="deobfuscate_final_filenames" id="deobfuscate_final_filenames" value="1" <!--#if int($deobfuscate_final_filenames) > 0 then 'checked="checked"' else ""#--> />
                         <span class="desc">$T('explain-deobfuscate_final_filenames') $T('explain-deobfuscate_final_filenames-ext')</span>
                     </div>
-                    <div class="field-pair advanced-settings">
-                        <label class="config" for="enable_meta">$T('opt-enable_meta')</label>
-                        <input type="checkbox" name="enable_meta" id="enable_meta" value="1" <!--#if int($enable_meta) > 0 then 'checked="checked"' else ""#--> />
-                        <span class="desc">$T('explain-enable_meta').replace('. ', '.<br/>')</span>
-                    </div>
                     <div class="field-pair">
                         <label class="config" for="cleanup_list">$T('opt-cleanup_list')</label>
                         <input type="text" name="cleanup_list" id="cleanup_list" value="$cleanup_list"/>
                         <span class="desc">$T('explain-cleanup_list')</span>
                     </div>
                     <div class="field-pair">
-                        <label class="config" for="history_retention_select">$T('opt-history_retention')</label>
-                        <input type="hidden" name="history_retention" id="history_retention" value="$history_retention">
-                        <select name="history_retention_select" id="history_retention_select">
-                            <option value="0">$T('history_retention-all')</option>
-                            <option value="n">$T('history_retention-number')</option>
-                            <option value="d">$T('history_retention-days')</option>
-                            <option value="-1">$T('history_retention-none')</option>
+                        <label class="config" for="history_retention_option">$T('opt-history_retention')</label>
+                        <select name="history_retention_option" id="history_retention_option">
+                            <option value="all" <!--#if $history_retention_option == "all" then 'selected="selected"' else ""#-->>$T('history_retention-all')</option>
+                            <option value="number-archive" <!--#if $history_retention_option == "number-archive" then 'selected="selected"' else ""#-->>$T('history_retention-number-archive')</option>
+                            <option value="number-delete" <!--#if $history_retention_option == "number-delete" then 'selected="selected"' else ""#-->>$T('history_retention-number-delete')</option>
+                            <option value="days-archive" <!--#if $history_retention_option == "days-archive" then 'selected="selected"' else ""#-->>$T('history_retention-days-archive')</option>
+                            <option value="days-delete" <!--#if $history_retention_option == "days-delete" then 'selected="selected"' else ""#-->>$T('history_retention-days-delete')</option>
+                            <option value="all-archive" <!--#if $history_retention_option == "all-archive" then 'selected="selected"' else ""#-->>$T('history_retention-archive')</option>
+                            <option value="all-delete" <!--#if $history_retention_option == "all-delete" then 'selected="selected"' else ""#-->>$T('history_retention-none')</option>
                         </select>
-                        <input type="number" id="history_retention_number" name="history_retention_number" min="1">
-                        <span class="desc">$T('explain-history_retention').replace('. ', '.<br/>')</span>
+                        <input type="number" id="history_retention_number" name="history_retention_number" min="1" value="$history_retention_number">
                     </div>
                     <div class="field-pair">
                         <button class="btn btn-default saveButton"><span class="glyphicon glyphicon-ok"></span> $T('button-saveChanges')</button>
@@ -278,7 +274,7 @@
         </div><!-- /section -->
         <div class="section advanced-settings">
             <div class="col2">
-                <h3>$T('swtag-naming') <a href="$helpuri$help_uri#toc4" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a></h3>
+                <h3>$T('swtag-naming') <a href="$help_uri#toc4" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a></h3>
             </div><!-- /col2 -->
             <div class="col1">
                 <fieldset>
@@ -293,11 +289,16 @@
                         <span class="desc">$T('explain-replace_spaces')</span>
                     </div>
                     <div class="field-pair">
+                        <label class="config" for="replace_underscores">$T('opt-replace_underscores')</label>
+                        <input type="checkbox" name="replace_underscores" id="replace_underscores" value="1" <!--#if int($replace_underscores) > 0 then 'checked="checked"' else ""#--> />
+                        <span class="desc">$T('explain-replace_underscores')</span>
+                    </div>
+                    <div class="field-pair">
                         <label class="config" for="replace_dots">$T('opt-replace_dots')</label>
                         <input type="checkbox" name="replace_dots" id="replace_dots" value="1" <!--#if int($replace_dots) > 0 then 'checked="checked"' else ""#--> />
                         <span class="desc">$T('explain-replace_dots')</span>
                     </div>
-                    <!--#if not $nt#-->
+                    <!--#if not $windows#-->
                     <div class="field-pair">
                         <label class="config" for="sanitize_safe">$T('opt-sanitize_safe')</label>
                         <input type="checkbox" name="sanitize_safe" id="sanitize_safe" value="1" <!--#if int($sanitize_safe) > 0 then 'checked="checked"' else ""#--> />
@@ -313,7 +314,7 @@
         </div><!-- /section -->
         <div class="section">
             <div class="col2">
-                <h3>$T('swtag-quota') <a href="$helpuri$help_uri#toc5" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a></h3>
+                <h3>$T('swtag-quota') <a href="$help_uri#toc5" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a></h3>
             </div><!-- /col2 -->
             <div class="col1">
                 <fieldset>
@@ -348,199 +349,33 @@
                 </fieldset>
             </div><!-- /col1 -->
         </div><!-- /section -->
-        <div class="section">
-            <div class="col2">
-                <h3>$T('swtag-indexing') <a href="$helpuri$help_uri#toc6" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a></h3>
-            </div><!-- /col2 -->
-            <div class="col1">
-                <fieldset>
-                    <div class="field-pair">
-                        <label class="config" for="rating_enable">$T('opt-rating_enable')</label>
-                        <input type="checkbox" name="rating_enable" id="rating_enable" value="1" <!--#if int($rating_enable) > 0 then 'checked="checked"' else ""#--> />
-                        <span class="desc">$T('explain-rating_enable').replace('. ', '.<br/>')</span>
-                    </div>
-                    <div class="field-pair">
-                        <label class="config" for="rating_api_key">$T('opt-rating_api_key')</label>
-                        <input type="text" name="rating_api_key" id="rating_api_key" value="$rating_api_key" />
-                        <span class="desc">$T('explain-rating_api_key')</span>
-                    </div>
-                    <div class="field-pair">
-                        <label class="config" for="rating_filter_enable">$T('opt-rating_filter_enable')</label>
-                        <input type="checkbox" name="rating_filter_enable" id="rating_filter_enable" value="1" <!--#if int($rating_filter_enable) > 0 then 'checked="checked"' else ""#--> />
-                        <span class="desc">$T('explain-rating_filter_enable')</span>
-                    </div>
-                    <div class="field-pair" id="rating_filter_abort">
-                        <label class="config">$T('opt-rating_filter_abort_if')</label>
-                        <div class="rating-filter">
-                            <p>
-                                <label for="rating_filter_abort_video">$T('opt-rating_filter_video')</label>
-                                <select name="rating_filter_abort_video" id="rating_filter_abort_video">
-                                    <option value="0" <!--#if $rating_filter_abort_video == 0 then 'selected="selected"' else ""#--> >$T('notUsed')</option>
-                                    <!--#for $val in $range(1, 10)#--><option value="$val" <!--#if $rating_filter_abort_video == $val then 'selected="selected"' else ""#--> >$val $T('orLess')</option><!--#end for#-->
-                                </select>
-                            </p>
-                            <p>
-                                <label for="rating_filter_abort_audio">$T('opt-rating_filter_audio')</label>
-                                <select name="rating_filter_abort_audio" id="rating_filter_abort_audio">
-                                    <option value="0" <!--#if $rating_filter_abort_audio == 0 then 'selected="selected"' else ""#--> >$T('notUsed')</option>
-                                    <!--#for $val in $range(1, 10)#--><option value="$val" <!--#if $rating_filter_abort_audio == $val then 'selected="selected"' else ""#--> >$val $T('orLess')</option><!--#end for#-->
-                                </select>
-                            </p>
-                            <p>
-                                <span>
-                                    <input type="checkbox" value="1" id="rating_filter_abort_encrypted" name="rating_filter_abort_encrypted" <!--#if int($rating_filter_abort_encrypted) > 0 then 'checked="checked"' else ""#--> />
-                                    <label for="rating_filter_abort_encrypted">$T('opt-rating_filter_passworded')</label>
-                                </span>
-                                <span>
-                                    <input type="checkbox" value="1" id="rating_filter_abort_encrypted_confirm" name="rating_filter_abort_encrypted_confirm" <!--#if int($rating_filter_abort_encrypted_confirm) > 0 then 'checked="checked"' else ""#--> />
-                                    <label for="rating_filter_abort_encrypted_confirm">$T('opt-rating_filter_confirmed')</label>
-                                </span>
-                            </p>
-                            <p>
-                                <span>
-                                    <input type="checkbox" value="1" id="rating_filter_abort_spam" name="rating_filter_abort_spam" <!--#if int($rating_filter_abort_spam) > 0 then 'checked="checked"' else ""#--> />
-                                    <label for="rating_filter_abort_spam">$T('opt-rating_filter_spam')</label>
-                                </span>
-                                <span>
-                                    <input type="checkbox" value="1" id="rating_filter_abort_spam_confirm" name="rating_filter_abort_spam_confirm" <!--#if int($rating_filter_abort_spam_confirm) > 0 then 'checked="checked"' else ""#--> />
-                                    <label for="rating_filter_abort_spam_confirm">$T('opt-rating_filter_confirmed')</label>
-                                </span>
-                            </p>
-                            <p>
-                                <input type="checkbox" value="1" id="rating_filter_abort_downvoted" name="rating_filter_abort_downvoted" <!--#if int($rating_filter_abort_downvoted) > 0 then 'checked="checked"' else ""#--> />
-                                <label for="rating_filter_abort_downvoted">$T('opt-rating_filter_downvoted')</label>
-                            </p>
-                            <p>
-                                <label for="rating_filter_abort_keywords">$T('opt-rating_filter_keywords')</label>
-                                <input type="text" name="rating_filter_abort_keywords" id="rating_filter_abort_keywords" value="$rating_filter_abort_keywords"/>
-                                <span class="desc">$T('explain-rating_filter_keywords')</span>
-                            </p>
-                        </div>
-                    </div>
-                    <div class="field-pair" id="rating_filter_pause">
-                        <label class="config">$T('opt-rating_filter_pause_if')</label>
-                        <div class="rating-filter">
-                            <p>
-                                <label for="rating_filter_pause_video">$T('opt-rating_filter_video')</label>
-                                <select name="rating_filter_pause_video" id="rating_filter_pause_video">
-                                    <option value="0" <!--#if $rating_filter_pause_video == 0 then 'selected="selected"' else ""#--> >$T('notUsed')</option>
-                                    <!--#for $val in $range(1, 10)#--><option value="$val" <!--#if $rating_filter_pause_video == $val then 'selected="selected"' else ""#--> >$val $T('orLess')</option><!--#end for#-->
-                                </select>
-                            </p>
-                            <p>
-                                <label for="rating_filter_pause_audio">$T('opt-rating_filter_audio')</label>
-                                <select name="rating_filter_pause_audio" id="rating_filter_pause_audio">
-                                    <option value="0" <!--#if $rating_filter_pause_audio == 0 then 'selected="selected"' else ""#--> >$T('notUsed')</option>
-                                    <!--#for $val in $range(1, 10)#--><option value="$val" <!--#if $rating_filter_pause_audio == $val then 'selected="selected"' else ""#--> >$val $T('orLess') </option><!--#end for#-->
-                                </select>
-                            </p>
-                            <p>
-                                <span>
-                                    <input type="checkbox" value="1" id="rating_filter_pause_encrypted" name="rating_filter_pause_encrypted" <!--#if int($rating_filter_pause_encrypted) > 0 then 'checked="checked"' else ""#--> />
-                                    <label for="rating_filter_pause_encrypted">$T('opt-rating_filter_passworded')</label>
-                                </span>
-                                <span>
-                                    <input type="checkbox" value="1" id="rating_filter_pause_encrypted_confirm" name="rating_filter_pause_encrypted_confirm" <!--#if int($rating_filter_pause_encrypted_confirm) > 0 then 'checked="checked"' else ""#--> />
-                                    <label for="rating_filter_pause_encrypted_confirm">$T('opt-rating_filter_confirmed')</label>
-                                </span>
-                            </p>
-                            <p>
-                                <span>
-                                    <input type="checkbox" value="1" id="rating_filter_pause_spam" name="rating_filter_pause_spam" <!--#if int($rating_filter_pause_spam) > 0 then 'checked="checked"' else ""#--> />
-                                    <label for="rating_filter_pause_spam">$T('opt-rating_filter_spam')</label>
-                                </span>
-                                <span>
-                                    <input type="checkbox" value="1" id="rating_filter_pause_spam_confirm" name="rating_filter_pause_spam_confirm" <!--#if int($rating_filter_pause_spam_confirm) > 0 then 'checked="checked"' else ""#--> />
-                                    <label for="rating_filter_pause_spam_confirm">$T('opt-rating_filter_confirmed')</label>
-                                </span>
-                            </p>
-                            <p>
-                                <input type="checkbox" value="1" id="rating_filter_pause_downvoted" name="rating_filter_pause_downvoted" <!--#if int($rating_filter_pause_downvoted) > 0 then 'checked="checked"' else ""#--> />
-                                <label for="rating_filter_pause_downvoted">$T('opt-rating_filter_downvoted')</label>
-                            </p>
-                            <p>
-                                <label for="rating_filter_pause_keywords">$T('opt-rating_filter_keywords')</label>
-                                <input type="text" name="rating_filter_pause_keywords" id="rating_filter_pause_keywords" value="$rating_filter_pause_keywords"/>
-                                <span class="desc">$T('explain-rating_filter_keywords')</span>
-                            </p>
-                        </div>
-                    </div>
-                    <div class="field-pair">
-                        <button class="btn btn-default saveButton"><span class="glyphicon glyphicon-ok"></span> $T('button-saveChanges')</button>
-                    </div>
-                </fieldset>
-            </div><!-- /col1 -->
-        </div><!-- /section -->
     </form>
 </div><!-- /colmask -->
 
 <script type="text/javascript">
-\$(document).ready(function() {
-    if (!\$('#rating_filter_enable').is(":checked")) {
-        \$("#rating_filter_abort").hide();
-        \$("#rating_filter_pause").hide();
-    }
-    \$('#rating_filter_enable').change(function () {
-        if (\$(this).is(":checked")) {
-            \$("#rating_filter_abort").show();
-            \$("#rating_filter_pause").show();
-        }
-        else {
-            \$("#rating_filter_abort").hide();
-            \$("#rating_filter_pause").hide();
-        }
-    });
-
-    \$('#history_retention_select, #history_retention_number').on('change', updateHistoryRetention)
+jQuery(document).ready(function() {
+    jQuery('#history_retention_option').on('change', updateHistoryRetention)
     function updateHistoryRetention() {
-        var retention_setting = \$('#history_retention')
-        var retention_select = \$('#history_retention_select').val()
-        var retention_number = \$('#history_retention_number')
-        // Keep all or keep none
-        if(retention_select == "0" || retention_select == "-1") {
+        var retention_option = jQuery('#history_retention_option').val()
+        var retention_number = jQuery('#history_retention_number')
+
+        if(retention_option === "number-archive" || retention_option === "number-delete") {
+            retention_number.show()
+            retention_number.attr('placeholder', '$T('history_retention-limit')')
+        } else if(retention_option === "days-archive" || retention_option === "days-delete") {
+            retention_number.show()
+            retention_number.attr('placeholder', '$T('days').capitalize()')
+        } else {
             retention_number.hide()
             retention_number.val('')
             retention_number.attr('placeholder', '')
-            retention_setting.val(retention_select)
-        } else {
-            retention_number.show()
-            // Days or number?
-            if(retention_select.indexOf("d") !== -1) {
-                retention_number.attr('placeholder', '$T('days').capitalize()')
-                if(retention_number.val()) {
-                    retention_setting.val(retention_number.val() + 'd')
-                } else if(parseInt(retention_setting.val()) > 0) {
-                    retention_number.val(parseInt(retention_setting.val()))
-                }
-            } else {
-                retention_number.attr('placeholder', '$T('history_retention-limit')')
-                if(retention_number.val()) {
-                    retention_setting.val(retention_number.val())
-                } else if(parseInt(retention_setting.val()) > 0) {
-                    retention_number.val(parseInt(retention_setting.val()))
-                }
-            }
         }
     }
-    // Set the history-retention settig
-    var retention_setting_value = \$('#history_retention').val()
-    if(parseInt(retention_setting_value) > 0) {
-        // Days or number?
-        if(retention_setting_value.indexOf("d") !== -1) {
-            \$('#history_retention_select').val("d")
-        } else {
-            \$('#history_retention_select').val("n")
-        }
-        \$('#history_retention_number').val(parseInt(retention_setting_value))
-    } else {
-        // Keep all or keep none
-        \$('#history_retention_select').val(retention_setting_value)
-        \$('#history_retention_number').hide()
-    }
+    updateHistoryRetention()
 
-    \$('.restoreDefaults').click(function(e) {
+    jQuery('.restoreDefaults').click(function(e) {
         // Get section name
-        var sectionName = \$(this).parents('.section').find('.col2 h3').text().trim()
+        var sectionName = jQuery(this).parents('.section').find('.col2 h3').text().trim()
 
         // Confirm?
         if(!confirm("$T('explain-restoreDefaults') \""+sectionName+"\"\n$T('confirm')")) return false
@@ -548,14 +383,14 @@
 
         // Need to get all the input values, so same way as saving normally
         var key_container = {}
-        \$(this).parents('.section').extractFormDataTo(key_container);
+        jQuery(this).parents('.section').extractFormDataTo(key_container);
         key_container = Object.keys(key_container)
 
         // Send request
-        \$.ajax({
-            type: "GET",
-            url: "../../api",
-            data: "mode=set_config_default&apikey=${apikey}&output=json&keyword=" + key_container.join('&keyword=')
+        jQuery.ajax({
+            type: "POST",
+            url: "$url('api')",
+            data: "mode=set_config_default&output=json&keyword=" + key_container.join('&keyword=')
         }).then(function(data) {
             // Reload page
             document.location = document.location

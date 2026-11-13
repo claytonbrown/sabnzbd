@@ -7,12 +7,11 @@ strict:
 stages:
   - name: server_stats (json output)
     request:
-      url: "http://{SAB_HOST}:{SAB_PORT}/sabnzbd/api"
+      url: "http://{SAB_HOST}:{SAB_PORT}/api"
       method: GET
       params:
         mode: server_stats
         apikey: "{SAB_APIKEY}"
-        output: json
     response:
       status_code: 200
       headers:
@@ -30,30 +29,9 @@ stages:
             day: !anyint
             daily: !anydict
 
-  - name: server_stats (text output)
-    request:
-      url: "http://{SAB_HOST}:{SAB_PORT}/sabnzbd/api"
-      method: GET
-      params:
-        mode: server_stats
-        apikey: "{SAB_APIKEY}"
-        output: text
-    response:
-      headers:
-        content-type: !re_match "text/plain"
-        content-type: !re_search "charset=(UTF|utf)-8"
-        pragma: "no-cache"
-        access-control-allow-origin: "*"
-        content-length: !re_match "[0-9]+"
-      status_code: 200
-      verify_response_with:
-        function: tavern.testutils.helpers:validate_regex
-        extra_kwargs:
-          expression: "{{(?=.*'total': [0-9]+)(?=.*'month': [0-9]+)(?=.*'week': [0-9]+)(?=.*'day': [0-9]+)(?=.*'servers': .*).*}}"
-
   - name: server_stats (xml output)
     request:
-      url: "http://{SAB_HOST}:{SAB_PORT}/sabnzbd/api"
+      url: "http://{SAB_HOST}:{SAB_PORT}/api"
       method: GET
       params:
         mode: server_stats
@@ -63,6 +41,7 @@ stages:
       headers:
         content-type: !re_match "text/xml"
         content-type: !re_search "charset=(UTF|utf)-8"
+        cache-control: "no-store"
         pragma: "no-cache"
         access-control-allow-origin: "*"
         content-length: !re_match "[0-9]+"

@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -OO
-# Copyright 2007-2021 The SABnzbd-Team <team@sabnzbd.org>
+# Copyright 2007-2026 by The SABnzbd-Team (sabnzbd.org)
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -21,18 +21,10 @@ from collections import namedtuple
 CONFIG_VERSION = 19
 
 QUEUE_VERSION = 10
-POSTPROC_QUEUE_VERSION = 2
+POSTPROC_QUEUE_VERSION = 3
+ONDISK_VERSION = 1
 
 REC_RAR_VERSION = 550
-
-PNFO = namedtuple(
-    "PNFO",
-    "repair unpack delete script nzo_id filename labels password unpackstrht "
-    "msgid category url bytes_left bytes avg_stamp avg_date finished_files "
-    "active_files queued_files status priority bytes_missing direct_unpack",
-)
-
-QNFO = namedtuple("QNFO", "bytes bytes_left bytes_left_previous_page list q_size_list q_fullsize")
 
 ANFO = namedtuple("ANFO", "article_sum cache_size cache_limit")
 
@@ -40,30 +32,34 @@ ANFO = namedtuple("ANFO", "article_sum cache_size cache_limit")
 # Or, when extra ".1", ".2" etc. are added for identically named jobs
 DEF_FOLDER_MAX = 256 - 10
 DEF_FILE_MAX = 255 - 10  # max filename length on modern filesystems, minus some room for extra chars later on
+DEX_FILE_EXTENSION_MAX = 20
 
-GIGI = float(2 ** 30)
-MEBI = float(2 ** 20)
-KIBI = float(2 ** 10)
+GIGI = float(2**30)
+MEBI = float(2**20)
+KIBI = float(2**10)
 
-BYTES_FILE_NAME_OLD = "totals9.sab"
 BYTES_FILE_NAME = "totals10.sab"
 QUEUE_FILE_TMPL = "queue%s.sab"
 QUEUE_FILE_NAME = QUEUE_FILE_TMPL % QUEUE_VERSION
-POSTPROC_QUEUE_FILE_NAME = "postproc%s.sab" % POSTPROC_QUEUE_VERSION
+POSTPROC_QUEUE_FILE_NAME = "postproc2.sab"
 RSS_FILE_NAME = "rss_data.sab"
 SCAN_FILE_NAME = "watched_data2.sab"
-RATING_FILE_NAME = "Rating.sab"
 FUTURE_Q_FOLDER = "future"
 JOB_ADMIN = "__ADMIN__"
 VERIFIED_FILE = "__verified__"
 RENAMES_FILE = "__renames__"
+ONDISK_FILE = "__ondisk__"
 ATTRIB_FILE = "SABnzbd_attrib"
+NZO_FILE = "SABnzbd_nzo_data"
 REPAIR_REQUEST = "repair-all.sab"
 
-SABYENC_VERSION_REQUIRED = "4.0.0"
+SABCTOOLS_VERSION_REQUIRED = "10.0.0"
 
 DB_HISTORY_VERSION = 1
 DB_HISTORY_NAME = "history%s.db" % DB_HISTORY_VERSION
+
+SESSIONS_VERSION = 2
+SESSIONS_FILE_NAME = "sessions.sab"
 
 DEF_DOWNLOAD_DIR = os.path.normpath("Downloads/incomplete")
 DEF_COMPLETE_DIR = os.path.normpath("Downloads/complete")
@@ -72,8 +68,9 @@ DEF_NZBBACK_DIR = ""
 DEF_LANGUAGE = "locale"
 DEF_INTERFACES = "interfaces"
 DEF_EMAIL_TMPL = "email"
-DEF_STDCONFIG = "Config"
-DEF_STDINTF = "Glitter"
+DEF_STD_CONFIG = "Config"
+DEF_STD_WEB_DIR = "Glitter"
+DEF_STD_WEB_COLOR = "Auto"
 DEF_MAIN_TMPL = os.path.normpath("templates/main.tmpl")
 DEF_INI_FILE = "sabnzbd.ini"
 DEF_HOST = "127.0.0.1"
@@ -81,19 +78,63 @@ DEF_PORT = 8080
 DEF_WORKDIR = "sabnzbd"
 DEF_LOG_FILE = "sabnzbd.log"
 DEF_LOG_ERRFILE = "sabnzbd.error.log"
-DEF_LOG_CHERRY = "cherrypy.log"
+DEF_LOG_ACCESSFILE = "access.log"
 DEF_ARTICLE_CACHE_DEFAULT = "500M"
 DEF_ARTICLE_CACHE_MAX = "1G"
-DEF_TIMEOUT = 60
+DEF_DOWNLOAD_FREE = DEF_ARTICLE_CACHE_DEFAULT  # So we have at least space for the cache
+DEF_NETWORKING_TIMEOUT = 60
+DEF_NETWORKING_TEST_TIMEOUT = 5
+DEF_NETWORKING_SHORT_TIMEOUT = 3
+DEF_PUBLIC_IP_CACHE_TTL = 600
 DEF_SCANRATE = 5
+DEF_HTTPS_CERT_FILE = "server.cert"
+DEF_HTTPS_KEY_FILE = "server.key"
+DEF_SORTER_RENAME_SIZE = "50M"
 MAX_WARNINGS = 20
 MAX_BAD_ARTICLES = 5
 
-# Constants affecting download performance
-MIN_DECODE_QUEUE = 10
-LIMIT_DECODE_QUEUE = 100
-DIRECT_WRITE_TRIGGER = 35
-MAX_ASSEMBLER_QUEUE = 5
+CONFIG_BACKUP_FILES = [
+    BYTES_FILE_NAME,
+    DB_HISTORY_NAME,
+]
+CONFIG_RESTORE_FILES = [
+    RSS_FILE_NAME,
+]
+CONFIG_BACKUP_HTTPS = {  # "basename": "associated setting"
+    DEF_HTTPS_CERT_FILE: "https_cert",
+    DEF_HTTPS_KEY_FILE: "https_key",
+    "server.chain": "https_chain",
+}
+
+# How often the downloader updates its meters and reconsiders the delay
+DOWNLOADER_TICK = 0.05
+# Share of the cache the backlog fills before the downloader is held back
+ASSEMBLER_DELAY_FILL = 0.5
+# Longest the downloader sleeps in one pass to let the disk catch up
+ASSEMBLER_MAX_DELAY = 0.5
+# Fraction of the measured write rate the downloader aims for, so the backlog shrinks
+# rather than merely holding
+ASSEMBLER_DRAIN_MARGIN = 0.9
+# Percentage of cache to use before adding file to assembler
+ASSEMBLER_TRIGGER_PERCENTAGE = 0.05
+# Files kept open for writing at once. Handles are cached so an article does not cost an
+# open/close pair, but they are a limited resource shared with every socket the
+# downloader holds, so the cache is bounded rather than growing with the queue.
+ASSEMBLER_MAX_OPEN_WRITERS = 32
+ASSEMBLER_WRITE_INTERVAL = 5.0
+NNTP_BUFFER_SIZE = int(256 * KIBI)
+NTTP_MAX_BUFFER_SIZE = int(10 * MEBI)
+DEF_PIPELINING_REQUESTS = 2
+# Article cache capacity factor to force a non-contiguous flush to disk, no later than the downloader is held back
+ARTICLE_CACHE_NON_CONTIGUOUS_FLUSH_PERCENTAGE = ASSEMBLER_DELAY_FILL
+# Memory left to the rest of the system when capping the article cache
+ARTICLE_CACHE_RESERVED_MEMORY = int(512 * MEBI)
+# Headroom left for the rest of SABnzbd when sizing par2's buffers
+PAR2_RESERVED_MEMORY = int(512 * MEBI)
+# Floor for par2's buffers
+PAR2_MINIMUM_MEMORY = int(32 * MEBI)
+# Shortest time between adding par2 for the failed articles of a file still downloading
+PROSPECTIVE_ADD_INTERVAL = 1.0
 
 REPAIR_PRIORITY = 3
 FORCE_PRIORITY = 2
@@ -102,30 +143,47 @@ NORMAL_PRIORITY = 0
 LOW_PRIORITY = -1
 DEFAULT_PRIORITY = -100
 PAUSED_PRIORITY = -2
-DUP_PRIORITY = -3
 STOP_PRIORITY = -4
+
+PP_LOOKUP = {0: "", 1: "R", 2: "U", 3: "D"}
 
 INTERFACE_PRIORITIES = {
     FORCE_PRIORITY: "Force",
     REPAIR_PRIORITY: "Repair",
     HIGH_PRIORITY: "High",
     NORMAL_PRIORITY: "Normal",
+    DEFAULT_PRIORITY: "Normal",
     LOW_PRIORITY: "Low",
 }
 
-STAGES = {"Source": 0, "Download": 1, "Servers": 2, "Repair": 3, "Filejoin": 4, "Unpack": 5, "Script": 6}
+STAGES = {
+    "RSS": 0,
+    "Source": 1,
+    "Download": 2,
+    "Servers": 3,
+    "Repair": 4,
+    "Filejoin": 5,
+    "Unpack": 6,
+    "Deobfuscate": 7,
+    "Script": 8,
+}
 
 VALID_ARCHIVES = (".zip", ".rar", ".7z")
 VALID_NZB_FILES = (".nzb", ".gz", ".bz2")
 
+# The only NZB <meta> types that are copied to nzo_info, the rest of nzo_info is for internal use
+NZO_INFO_FROM_META = frozenset({"propername", "episodename", "year", "failure", "details", "more_info"})
+
 CHEETAH_DIRECTIVES = {"directiveStartToken": "<!--#", "directiveEndToken": "#-->", "prioritizeSearchListOverSelf": True}
 
-IGNORED_FOLDERS = ("@eaDir", ".appleDouble")
+IGNORED_FILES_AND_FOLDERS = ("@eaDir", ".appleDouble", ".DS_Store")
 IGNORED_MOVIE_FOLDERS = ("video_ts", "audio_ts", "bdmv")
 
 EXCLUDED_GUESSIT_PROPERTIES = [
     "part",
 ]
+GUESSIT_PART_INDICATORS = ("cd", "part")
+GUESSIT_SORT_TYPES = {0: "all", 1: "tv", 2: "date", 3: "movie", 4: "unknown"}
 
 
 class Status:
@@ -145,4 +203,20 @@ class Status:
     RUNNING = "Running"  # PP: User's post processing script is running
     VERIFYING = "Verifying"  # PP: Job is being verified (by par2)
     DELETED = "Deleted"  # Q:  Job has been deleted (and is almost gone)
-    PROP = "Propagating"  # Q:  Delayed download
+    PROPAGATING = "Propagating"  # Q:  Delayed download
+
+
+class DuplicateStatus:
+    DUPLICATE = "Duplicate"  # Simple duplicate
+    DUPLICATE_ALTERNATIVE = "Duplicate Alternative"  # Alternative duplicate for a queued job
+    SMART_DUPLICATE = "Smart Duplicate"  # Simple Series duplicate
+    SMART_DUPLICATE_ALTERNATIVE = "Smart Duplicate Alternative"  # Alternative duplicate for a queued job
+    DUPLICATE_IGNORED = "Duplicate Ignored"
+
+
+class AddNzbFileResult:
+    RETRY = "Retry"  # File could not be read
+    ERROR = "Error"  # Rejected as duplicate or other failure to process file
+    PREQUEUE_REJECTED = "Pre-queue rejected"  # Rejected by pre-queue script
+    OK = "OK"  # Added to queue
+    NO_FILES_FOUND = "No files found"  # Malformed or might not be an NZB file

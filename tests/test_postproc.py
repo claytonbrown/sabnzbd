@@ -1,3 +1,14 @@
+#!/usr/bin/python3 -OO
+# Copyright 2007-2026 by The SABnzbd-Team (sabnzbd.org)
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
@@ -8,83 +19,946 @@
 tests.test_postproc- Tests of various functions in newspack, among which rar_renamer()
 """
 
+import functools
+import os
+import re
 import shutil
 from unittest import mock
 
-from sabnzbd.postproc import *
-from tests.testhelper import *
+import pytest
+
+import sabnzbd
+import sabnzbd.config
+from sabnzbd import postproc
+from sabnzbd.constants import Status
+from sabnzbd.config import ConfigCat, ConfigSorter
+from sabnzbd.deobfuscate_filenames import deobfuscate
+from sabnzbd.filesystem import clip_path, globber_full
+from sabnzbd.misc import sort_to_opts
+from sabnzbd.nzb import NzbObject
+from tests.testhelper import SAB_CACHE_DIR, SAB_DATA_DIR, make_mock_nzo
 
 
+@pytest.mark.usefixtures("clean_cache_dir")
 class TestPostProc:
+    # Helper function for rar_renamer tests
+    def _deobfuscate_dir(self, sourcedir, expected_filename_matches):
+        """Function to deobfuscate one directory with rar_renamer()"""
+        # We create a workingdir inside the sourcedir, because the filenames are really changed
+        workingdir = os.path.join(SAB_CACHE_DIR, "workingdir_test_rar_renamer")
 
-    # Tests of rar_renamer() (=deobfuscate) against various input directories
-    def test_rar_renamer(self):
-
-        # Function to deobfuscate one directorty with rar_renamer()
-        def deobfuscate_dir(sourcedir, expected_filename_matches):
-            # We create a workingdir inside the sourcedir, because the filenames are really changed
-            workingdir = os.path.join(sourcedir, "workingdir")
-
-            # if workingdir is still there from previous run, remove it:
-            if os.path.isdir(workingdir):
-                try:
-                    shutil.rmtree(workingdir)
-                except PermissionError:
-                    pytest.fail("Could not remove existing workingdir %s for rar_renamer" % workingdir)
-
-            # create a fresh copy
-            try:
-                shutil.copytree(sourcedir, workingdir)
-            except:
-                pytest.fail("Could not create copy of files for rar_renamer")
-
-            # And now let the magic happen:
-            nzo = mock.Mock()
-            nzo.final_name = "somedownloadname"
-            number_renamed_files = rar_renamer(nzo, workingdir)
-
-            # run check on the resulting files
-            if expected_filename_matches:
-                for filename_match in expected_filename_matches:
-                    if len(globber_full(workingdir, filename_match)) != expected_filename_matches[filename_match]:
-                        pytest.fail("Failed filename_match %s in %s" % (filename_match, workingdir))
-
-            # Remove workingdir again
+        # if workingdir is still there from previous run, remove it:
+        if os.path.isdir(workingdir):
             try:
                 shutil.rmtree(workingdir)
-            except:
+            except PermissionError:
                 pytest.fail("Could not remove existing workingdir %s for rar_renamer" % workingdir)
 
-            return number_renamed_files
+        # create a fresh copy
+        try:
+            shutil.copytree(sourcedir, workingdir)
+        except Exception:
+            pytest.fail("Could not create copy of files for rar_renamer")
 
-        # obfuscated, single rar set
+        # And now let the magic happen:
+        nzo = make_mock_nzo(final_name="somedownloadname", download_path=workingdir)
+        number_renamed_files = postproc.rar_renamer(nzo)
+
+        # run check on the resulting files
+        if expected_filename_matches:
+            for filename_match in expected_filename_matches:
+                if len(globber_full(workingdir, filename_match)) != expected_filename_matches[filename_match]:
+                    pytest.fail("Failed filename_match %s in %s" % (filename_match, workingdir))
+
+        # Remove workingdir again
+        try:
+            shutil.rmtree(workingdir)
+        except Exception:
+            pytest.fail("Could not remove existing workingdir %s for rar_renamer" % workingdir)
+
+        return number_renamed_files
+
+    def test_rar_renamer_obfuscated_single_rar_set(self):
+        """Test rar_renamer with obfuscated single rar set"""
         sourcedir = os.path.join(SAB_DATA_DIR, "obfuscated_single_rar_set")
         # Now define the filematches we want to see, in which amount ("*-*-*-*-*" are the input files):
         expected_filename_matches = {"*part007.rar": 1, "*-*-*-*-*": 0}
-        assert deobfuscate_dir(sourcedir, expected_filename_matches) == 7
+        assert self._deobfuscate_dir(sourcedir, expected_filename_matches) == 7
 
-        # obfuscated, two rar sets
+    def test_rar_renamer_obfuscated_two_rar_sets(self):
+        """Test rar_renamer with obfuscated two rar sets"""
         sourcedir = os.path.join(SAB_DATA_DIR, "obfuscated_two_rar_sets")
         expected_filename_matches = {"*part007.rar": 2, "*part009.rar": 1, "*-*-*-*-*": 0}
-        assert deobfuscate_dir(sourcedir, expected_filename_matches) == 16
+        assert self._deobfuscate_dir(sourcedir, expected_filename_matches) == 16
 
-        # obfuscated, but not a rar set
+    def test_rar_renamer_obfuscated_but_no_rar(self):
+        """Test rar_renamer with obfuscated files that are not rar sets"""
         sourcedir = os.path.join(SAB_DATA_DIR, "obfuscated_but_no_rar")
         expected_filename_matches = {"*.rar": 0, "*-*-*-*-*": 6}
-        assert deobfuscate_dir(sourcedir, expected_filename_matches) == 0
+        assert self._deobfuscate_dir(sourcedir, expected_filename_matches) == 0
 
+    def test_rar_renamer_single_rar_set_missing_first_rar(self):
+        """Test rar_renamer with single rar set missing first rar"""
         # One obfuscated rar set, but first rar (.part1.rar) is missing
         sourcedir = os.path.join(SAB_DATA_DIR, "obfuscated_single_rar_set_missing_first_rar")
         # single rar set (of 6 obfuscated rar files), so we expect renaming
         # thus result must 6 rar files, and 0 obfuscated files
         expected_filename_matches = {"*.rar": 6, "*-*-*-*-*": 0}
         # 6 files should have been renamed
-        assert deobfuscate_dir(sourcedir, expected_filename_matches) == 6
+        assert self._deobfuscate_dir(sourcedir, expected_filename_matches) == 6
 
+    def test_rar_renamer_double_rar_set_missing_rar(self):
+        """Test rar_renamer with two rar sets where some rars are missing"""
         # Two obfuscated rar sets, but some rars are missing
         sourcedir = os.path.join(SAB_DATA_DIR, "obfuscated_double_rar_set_missing_rar")
         # Two sets, missing rar, so we expect no renaming
         # thus result should be 0 rar files, and still 8 obfuscated files
         expected_filename_matches = {"*.rar": 0, "*-*-*-*-*": 8}
         # 0 files should have been renamed
-        assert deobfuscate_dir(sourcedir, expected_filename_matches) == 0
+        assert self._deobfuscate_dir(sourcedir, expected_filename_matches) == 0
+
+    def test_rar_renamer_fully_encrypted_and_obfuscated(self):
+        """Test rar_renamer with fully encrypted and obfuscated rar set"""
+        # fully encrypted rar-set, and obfuscated rar names
+        sourcedir = os.path.join(SAB_DATA_DIR, "fully_encrypted_and_obfuscated_rars")
+        # SABnzbd cannot do anything with this, so we expect no renaming
+        expected_filename_matches = {"*.rar": 0, "*-*-*-*-*": 6}
+        # 0 files should have been renamed
+        assert self._deobfuscate_dir(sourcedir, expected_filename_matches) == 0
+
+    @pytest.mark.parametrize(
+        "rars, expected",
+        [
+            ([], False),
+            (["a.rar", "a.r00", "a.r01"], False),
+            (["a.part01.rar", "a.part02.rar"], False),
+            (["a.part1.rar", "a.part2.rar"], False),
+            (["a.rar", "a.r00", "b.part01.rar", "b.part02.rar"], False),
+            (["a.part02.rar", "a.part03.rar"], True),
+            (["a.r00", "a.r01"], True),
+            # Every volume has its own name
+            (["aaa.rar", "bbb.r00", "ccc.r01"], True),
+            (["aaa.rar", "bbb.r00", "ccc.r01", "ddd.r02"], True),
+        ],
+    )
+    def test_rar_sets_missing_first_volume(self, rars, expected):
+        assert postproc.rar_sets_missing_first_volume([os.path.join("dir", rar) for rar in rars]) is expected
+
+    @pytest.fixture
+    def category_in_program_dir(self, monkeypatch):
+        """Bypasses the validator, like a link that changed after the category folder was set"""
+        sabnzbd.config.read_config(os.devnull)
+        prog_dir = os.path.join(SAB_CACHE_DIR, "prog")
+        os.makedirs(os.path.join(prog_dir, "interfaces"), exist_ok=True)
+        monkeypatch.setattr(sabnzbd, "DIR_PROG", prog_dir)
+        category = mock.Mock()
+        category.dir.return_value = os.path.join(prog_dir, "interfaces*")
+        monkeypatch.setattr(postproc.config, "get_category", lambda cat="*": category)
+        return prog_dir
+
+    @pytest.mark.config({"complete_dir": os.path.join(SAB_CACHE_DIR, "complete")})
+    def test_prepare_extraction_path_not_in_program_dir(self, category_in_program_dir):
+        """A category folder that points into the program folder fails the job"""
+        with pytest.raises(IOError):
+            postproc.prepare_extraction_path(make_mock_nzo(cat="movies"))
+        assert os.listdir(os.path.join(category_in_program_dir, "interfaces")) == []
+
+    @pytest.mark.parametrize("has_jobdir", [True, False])
+    @pytest.mark.config({"complete_dir": os.path.join(SAB_CACHE_DIR, "complete")})
+    def test_prepare_extraction_path_parent_of_program_dir(self, category_in_program_dir, has_jobdir):
+        """Only without a job folder can files be written into the program folder from a folder above it"""
+        postproc.config.get_category().dir.return_value = SAB_CACHE_DIR + ("" if has_jobdir else "*")
+        if has_jobdir:
+            _, workdir_complete, _, _, _ = postproc.prepare_extraction_path(make_mock_nzo(cat="movies"))
+            assert os.path.dirname(clip_path(workdir_complete)) == SAB_CACHE_DIR
+        else:
+            with pytest.raises(IOError):
+                postproc.prepare_extraction_path(make_mock_nzo(cat="movies"))
+
+    @pytest.mark.parametrize("category", ["testcat", "Default", None])
+    @pytest.mark.parametrize("has_jobdir", [True, False])  # With or without a job dir
+    @pytest.mark.parametrize("has_catdir", [True, False])  # Complete directory is defined at category level
+    @pytest.mark.parametrize("has_active_sorter", [True, False])  # Sorter active for the fake nzo
+    @pytest.mark.parametrize("sort_string", ["%sn (%r)", "%sn (%r)/file.%ext", ""])  # Identical path result
+    @pytest.mark.parametrize("marker_file", [None, ".marker"])
+    @pytest.mark.parametrize("do_folder_rename", [True, False])
+    @pytest.mark.config(
+        lambda params: {
+            "marker_file": params["marker_file"],
+            "folder_rename": params["do_folder_rename"],
+            "download_dir": os.path.join(SAB_CACHE_DIR, "incomplete"),
+            "complete_dir": os.path.join(SAB_CACHE_DIR, "complete"),
+        }
+    )
+    def test_prepare_extraction_path(
+        self, category, has_jobdir, has_catdir, has_active_sorter, sort_string, marker_file, do_folder_rename
+    ):
+        # Every parametrization asserts on the exact directory name that comes out, but that
+        # name depends on what's already on disk. Best effort cleanup.
+        shutil.rmtree(SAB_CACHE_DIR, ignore_errors=True)
+        os.makedirs(SAB_CACHE_DIR, exist_ok=True)
+
+        # Ensure global CFG_ vars are initialised
+        sabnzbd.config.read_config(os.devnull)
+
+        # Define a sorter and a category (as @pytest.mark.config cannot handle those)
+        ConfigSorter(
+            "sorter__test_prepare_extraction_path",
+            {
+                "order": 0,
+                "min_size": 42,
+                "multipart_label": "",
+                "sort_string": sort_string,
+                "sort_cats": [category if category else "no_such_category"],
+                "sort_type": [
+                    sort_to_opts("all"),
+                ],
+                "is_active": int(has_active_sorter),
+            },
+        )
+        assert sabnzbd.config.CONFIG.database["sorters"]["sorter__test_prepare_extraction_path"]
+
+        if category:
+            ConfigCat(
+                category,
+                {
+                    "order": 0,
+                    "pp": None,
+                    "script": None,
+                    "dir": (
+                        os.path.join(SAB_CACHE_DIR, ("category_dir_for_" + category + ("*" if not has_jobdir else "")))
+                        if has_catdir
+                        else None
+                    ),
+                    "newzbin": "",
+                    "priority": 0,
+                },
+            )
+            assert sabnzbd.config.CONFIG.database["categories"][category]
+
+        # Mock a minimal nzo, required as function input
+        fake_nzo = make_mock_nzo(final_name="FOSS.Rules.S23E06.2160p-SABnzbd", cat=category)
+
+        def _func():
+            (
+                tmp_workdir_complete,
+                workdir_complete,
+                file_sorter,
+                not_create_job_dir,
+                marker_file_result,
+            ) = postproc.prepare_extraction_path(fake_nzo)
+
+            tmp_workdir_complete = clip_path(tmp_workdir_complete)
+            workdir_complete = clip_path(workdir_complete)
+
+            # Verify marker file
+            if marker_file and not not_create_job_dir:
+                assert marker_file_result
+            else:
+                assert not marker_file_result
+
+            # Verify sorter
+            assert file_sorter
+            if has_active_sorter and category and sort_string:
+                assert file_sorter.sorter_active
+            else:
+                assert not file_sorter.sorter_active
+
+            # Verify not_create_job_dir
+            if category and has_catdir and not has_jobdir and not file_sorter.sorter_active:
+                assert not_create_job_dir
+            else:
+                # Double negatives ftw
+                assert not not_create_job_dir
+
+            # Verify workdir_complete
+            if not category or not has_catdir:
+                # Using standard Complete directory as base
+                assert workdir_complete.startswith(os.path.join(SAB_CACHE_DIR, "complete"))
+            elif category and has_catdir:
+                # Based on the category directory
+                assert workdir_complete.startswith(os.path.join(SAB_CACHE_DIR, "category_dir_for_" + category))
+            # Check the job directory part (or the lack thereof) as well
+            if has_active_sorter and category and sort_string:
+                # Sorter path, with an extra job name work directory inside
+                assert re.fullmatch(
+                    re.escape(SAB_CACHE_DIR)
+                    + r".*"
+                    + re.escape(os.sep)
+                    + r"Foss Rules \(2160p\)"
+                    + re.escape(os.sep)
+                    + fake_nzo.final_name
+                    + r"(\.\d+)?",
+                    workdir_complete,
+                )
+            elif has_jobdir or not (category and has_catdir):
+                # Standard job name directory
+                assert re.fullmatch(
+                    re.escape(SAB_CACHE_DIR) + r".*" + re.escape(os.sep) + r"FOSS.Rules.S23E06.2160p-SABnzbd(\.\d+)?",
+                    workdir_complete,
+                )
+            else:
+                # No job directory at all
+                assert re.fullmatch(
+                    re.escape(SAB_CACHE_DIR) + r".*" + re.escape(os.sep) + r"category_dir_for_([a-zA-Z]+)",
+                    workdir_complete,
+                )
+
+            # Verify tmp_workdir_complete
+            if do_folder_rename:
+                if not not_create_job_dir:
+                    assert tmp_workdir_complete != workdir_complete
+                assert tmp_workdir_complete.replace("_UNPACK_", "") == workdir_complete
+            else:
+                assert tmp_workdir_complete == workdir_complete
+
+        _func()
+
+    @staticmethod
+    def _sorted_nzo(sort_string, final_name="Show.S01E02.720p", nzo_info=None):
+        sabnzbd.config.read_config(os.devnull)
+        ConfigSorter(
+            "sorter__test_containment",
+            {"order": 0, "sort_string": sort_string, "sort_cats": ["tv"], "sort_type": [], "is_active": 1},
+        )
+        ConfigCat("tv", {"order": 0})
+        nzo = make_mock_nzo(final_name=final_name, cat="tv")
+        nzo.nzo_info = nzo_info or {}
+        return nzo
+
+    @pytest.mark.parametrize(
+        "sort_string, final_name, nzo_info",
+        [
+            ("%t/Season %s", "Show.S01E02.720p", {"propername": "../../../../outside/evil"}),
+            ("%t/Season %s", "Show.S01E02.720p", {"propername": ".../.../.../outside/evil"}),
+            ("%t/Season %s", "Show.S01E02.720p", {"propername": "..../..../..../..../outside/evil"}),
+            ("%t/Season %s", "Show.S01E02.720p", {"propername": "..\\..\\..\\outside\\evil"}),
+            ("%t/Season %s", "Show.S01E02.720p", {"propername": "/outside/evil"}),
+            ("%t/Season %s", "Show.S01E02.720p", {"propername": "C:\\outside\\evil"}),
+            ("%t/%en", "Show.S01E02.720p", {"episodename": ".../.../.../outside/evil"}),
+            ("%y/%t", "Show.S01E02.720p", {"year": ".../.../.../outside"}),
+            ("%y/%t", "Show.S01E02.720p", {"year": "/outside"}),
+            ("%dn", "_..._", None),
+            ("%dn/%dn", "_..._", None),
+            ("%dn/%dn", "_.._", None),
+            ("{.}{.}/{.}{.}/%t", "Show.S01E02.720p", None),
+        ],
+    )
+    @pytest.mark.config({"complete_dir": os.path.join(SAB_CACHE_DIR, "complete")})
+    def test_get_complete_directory_sorter_contained(self, sort_string, final_name, nzo_info):
+        """Values taken from the job can never move the sorted folder out of the Complete folder"""
+        complete_dir, _, _ = postproc.get_complete_directory(self._sorted_nzo(sort_string, final_name, nzo_info))
+        base = os.path.join(SAB_CACHE_DIR, "complete")
+        assert os.path.commonpath((base, clip_path(complete_dir))) == base
+
+    @pytest.mark.config({"complete_dir": os.path.join(SAB_CACHE_DIR, "complete")})
+    def test_prepare_extraction_path_sorted_outside_complete(self):
+        """A sorted folder that still ends up outside fails the job"""
+        outside = os.path.join(SAB_CACHE_DIR, "other")
+        with mock.patch.object(postproc.Sorter, "get_final_path", return_value=outside):
+            with pytest.raises(IOError):
+                postproc.prepare_extraction_path(self._sorted_nzo("%t"))
+        assert not os.path.exists(outside)
+
+    @pytest.mark.config({"complete_dir": os.path.join(SAB_CACHE_DIR, "complete")})
+    def test_prepare_extraction_path_absolute_sort_string(self):
+        """An absolute sort string is a choice of the user"""
+        nzo = self._sorted_nzo(os.path.join(SAB_CACHE_DIR, "sorted", "%t"))
+        _, workdir_complete, file_sorter, _, _ = postproc.prepare_extraction_path(nzo)
+        assert clip_path(workdir_complete).startswith(os.path.join(SAB_CACHE_DIR, "sorted", "Show"))
+        assert file_sorter.sorter_active
+
+
+@pytest.mark.usefixtures("clean_cache_dir")
+class TestGetLastLine:
+    @pytest.mark.parametrize(
+        "txt, expected",
+        [
+            ("", ""),
+            ("plain text", "plain text"),
+            ("first\nsecond\nlast", "last"),
+            ("last\n\n\n", "last"),
+            ("<b>bold</b>", "bold"),
+            ("<a href='x'>link</a>", "link"),
+            # Unclosed tags must not survive to be completed by later markup
+            ("<img src=x onerror=alert(apiKey)", ""),
+            ("text <script>evil", "text  evil"),
+            ("<img src=x onerror=alert(1)\nafter", "after"),
+            ("<div\n<span", ""),
+        ],
+    )
+    def test_get_last_line(self, txt, expected):
+        result = postproc.get_last_line(txt)
+        assert result == expected
+        assert "<" not in result
+
+    def test_get_last_line_truncates(self):
+        result = postproc.get_last_line("x" * 200)
+        assert len(result) == 150
+        assert result.endswith("...")
+
+
+class TestCleanupList:
+    @staticmethod
+    def _create_file(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(b"data")
+        assert os.path.exists(path)
+        return path
+
+    @pytest.mark.config({"cleanup_list": ["exe", "nzb"]})
+    def test_cleanup_list_only_tracked_files(self):
+        """Only files of the job may be removed, not other files in the same folder"""
+        base_dir = os.path.join(SAB_CACHE_DIR, "complete_cleanup")
+        job_files = [self._create_file(os.path.join(base_dir, f)) for f in ("job.mkv", "job.exe", "job.nzb")]
+        # Files matching the cleanup list, but not part of the job
+        unrelated_file = self._create_file(os.path.join(base_dir, "MyApplication", "fake.exe"))
+        # Tracked files that no longer exist shouldn't cause problems
+        gone_file = os.path.join(base_dir, "gone.exe")
+
+        remaining_files = postproc.cleanup_list([*job_files, gone_file], base_dir, skip_nzb=False)
+
+        assert remaining_files == [job_files[0], gone_file]
+        assert os.path.exists(job_files[0])
+        assert not os.path.exists(job_files[1])
+        assert not os.path.exists(job_files[2])
+        assert os.path.exists(unrelated_file)
+
+    @pytest.mark.config({"cleanup_list": ["exe", "nzb"]})
+    def test_cleanup_list_skip_nzb(self):
+        """The nzb extension should be ignored when skip_nzb is set"""
+        base_dir = os.path.join(SAB_CACHE_DIR, "complete_cleanup")
+        job_files = [self._create_file(os.path.join(base_dir, f)) for f in ("job.exe", "job.nzb")]
+
+        remaining_files = postproc.cleanup_list(job_files, base_dir, skip_nzb=True)
+
+        assert remaining_files == [job_files[1]]
+        assert not os.path.exists(job_files[0])
+        assert os.path.exists(job_files[1])
+
+    @pytest.mark.config({"cleanup_list": ["nfo"]})
+    def test_cleanup_list_removes_empty_parent_dirs(self):
+        """Directories left empty by the removed files are pruned, but never the base directory"""
+        base_dir = os.path.join(SAB_CACHE_DIR, "complete_cleanup")
+        job_file = self._create_file(os.path.join(base_dir, "sub", "deeper", "job.nfo"))
+        # Unrelated empty directory should be left alone
+        unrelated_dir = os.path.join(base_dir, "empty_dir")
+        os.makedirs(unrelated_dir, exist_ok=True)
+
+        assert postproc.cleanup_list([job_file], base_dir, skip_nzb=False) == []
+        assert not os.path.exists(os.path.join(base_dir, "sub"))
+        assert os.path.exists(unrelated_dir)
+        assert os.path.exists(base_dir)
+
+    @pytest.mark.config({"cleanup_list": ["images/*"]})
+    def test_cleanup_list_path_patterns(self):
+        """Path patterns are matched relative to the base directory"""
+        base_dir = os.path.join(SAB_CACHE_DIR, "complete_cleanup")
+        job_files = [
+            self._create_file(os.path.join(base_dir, f)) for f in (os.path.join("images", "pic.jpg"), "pic.jpg")
+        ]
+
+        remaining_files = postproc.cleanup_list(job_files, base_dir, skip_nzb=False)
+
+        assert remaining_files == [job_files[1]]
+        assert not os.path.exists(job_files[0])
+        assert os.path.exists(job_files[1])
+
+    @pytest.mark.config({"cleanup_list": []})
+    def test_cleanup_list_disabled(self):
+        """Without a cleanup list, nothing is removed"""
+        base_dir = os.path.join(SAB_CACHE_DIR, "complete_cleanup")
+        job_files = [self._create_file(os.path.join(base_dir, "job.exe"))]
+
+        assert postproc.cleanup_list(job_files, base_dir, skip_nzb=False) == job_files
+        assert os.path.exists(job_files[0])
+
+
+@pytest.mark.usefixtures("clean_cache_dir")
+class TestRemoveSamples:
+    @staticmethod
+    def _create_file(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write("x")
+        return path
+
+    def test_remove_samples_removes_emptied_folder(self):
+        """The sample folder is removed once its sample files are gone"""
+        base_dir = os.path.join(SAB_CACHE_DIR, "complete_samples")
+        keep = self._create_file(os.path.join(base_dir, "movie.mkv"))
+        self._create_file(os.path.join(base_dir, "Sample", "movie-sample.mkv"))
+        other_empty = os.path.join(base_dir, "unrelated")
+        os.makedirs(other_empty)
+
+        postproc.remove_samples(base_dir)
+
+        assert os.path.exists(keep)
+        assert not os.path.exists(os.path.join(base_dir, "Sample"))
+        assert os.path.isdir(other_empty)
+
+    def test_remove_samples_keeps_folder_with_other_files(self):
+        """A folder that still has other files is kept"""
+        base_dir = os.path.join(SAB_CACHE_DIR, "complete_samples")
+        self._create_file(os.path.join(base_dir, "movie.mkv"))
+        self._create_file(os.path.join(base_dir, "Sample", "movie-sample.mkv"))
+        other = self._create_file(os.path.join(base_dir, "Sample", "readme.txt"))
+
+        postproc.remove_samples(base_dir)
+
+        assert os.path.exists(other)
+
+
+@pytest.mark.usefixtures("clean_cache_dir")
+class TestRemoveUnwantedFiles:
+    @staticmethod
+    def _create_file(path, content=b"data"):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(content)
+        assert os.path.exists(path)
+        return path
+
+    @staticmethod
+    def _fake_nzo(unwanted_ext=0):
+        return make_mock_nzo(final_name="TestDownload", unwanted_ext=unwanted_ext)
+
+    @pytest.mark.config({"unwanted_extensions": ["exe"], "action_on_unwanted_extensions": 2})
+    def test_remove_unwanted_files_only_tracked_files(self):
+        """Only files of the job may be removed, not other files in the same folder"""
+        base_dir = os.path.join(SAB_CACHE_DIR, "complete_unwanted")
+        job_files = [self._create_file(os.path.join(base_dir, f)) for f in ("job.mkv", "job.exe")]
+        # File matching the unwanted extensions, but not part of the job
+        unrelated_file = self._create_file(os.path.join(base_dir, "MyApplication", "fake.exe"))
+        # Tracked files that no longer exist shouldn't cause problems
+        gone_file = os.path.join(base_dir, "gone.exe")
+        fake_nzo = self._fake_nzo()
+
+        remaining_files, job_failed = postproc.remove_unwanted_files(fake_nzo, [*job_files, gone_file], base_dir)
+
+        assert remaining_files == [job_files[0], gone_file]
+        assert job_failed
+        assert os.path.exists(job_files[0])
+        assert not os.path.exists(job_files[1])
+        assert os.path.exists(unrelated_file)
+        fake_nzo.set_unpack_info.assert_called_once()
+
+    @pytest.mark.config({"unwanted_extensions": ["exe"], "action_on_unwanted_extensions": 1})
+    def test_remove_unwanted_files_removes_empty_parent_dirs(self):
+        """Directories left empty by the removed files are pruned, but never the base directory"""
+        base_dir = os.path.join(SAB_CACHE_DIR, "complete_unwanted")
+        job_file = self._create_file(os.path.join(base_dir, "sub", "deeper", "job.exe"))
+
+        assert postproc.remove_unwanted_files(self._fake_nzo(), [job_file], base_dir) == ([], False)
+        assert not os.path.exists(os.path.join(base_dir, "sub"))
+        assert os.path.exists(base_dir)
+
+    @pytest.mark.config(
+        {"unwanted_extensions": ["mkv", "srt"], "unwanted_extensions_mode": 1, "action_on_unwanted_extensions": 2}
+    )
+    def test_remove_unwanted_files_whitelist_mode(self):
+        """In whitelist mode anything not listed is removed, except files without extension"""
+        base_dir = os.path.join(SAB_CACHE_DIR, "complete_unwanted")
+        job_files = [self._create_file(os.path.join(base_dir, f)) for f in ("job.mkv", "job.exe", "no_extension")]
+
+        remaining_files, job_failed = postproc.remove_unwanted_files(self._fake_nzo(), job_files, base_dir)
+
+        assert remaining_files == [job_files[0], job_files[2]]
+        assert job_failed
+        assert os.path.exists(job_files[0])
+        assert not os.path.exists(job_files[1])
+        assert os.path.exists(job_files[2])
+
+    @pytest.mark.config({"unwanted_extensions": ["exe"], "action_on_unwanted_extensions": 0})
+    def test_remove_unwanted_files_no_action_configured(self):
+        """Without an action configured, nothing is removed"""
+        base_dir = os.path.join(SAB_CACHE_DIR, "complete_unwanted")
+        job_files = [self._create_file(os.path.join(base_dir, "job.exe"))]
+        fake_nzo = self._fake_nzo()
+
+        assert postproc.remove_unwanted_files(fake_nzo, job_files, base_dir) == (job_files, False)
+        assert os.path.exists(job_files[0])
+        fake_nzo.set_unpack_info.assert_not_called()
+
+    @pytest.mark.config({"unwanted_extensions": [], "action_on_unwanted_extensions": 2})
+    def test_remove_unwanted_files_no_extensions_configured(self):
+        """Without unwanted extensions configured, nothing is removed"""
+        base_dir = os.path.join(SAB_CACHE_DIR, "complete_unwanted")
+        job_files = [self._create_file(os.path.join(base_dir, "job.exe"))]
+        fake_nzo = self._fake_nzo()
+
+        assert postproc.remove_unwanted_files(fake_nzo, job_files, base_dir) == (job_files, False)
+        assert os.path.exists(job_files[0])
+        assert not fake_nzo.fail_msg
+
+    @pytest.mark.config({"unwanted_extensions": ["exe"], "action_on_unwanted_extensions": 2})
+    def test_remove_unwanted_files_user_override(self):
+        """Skip the check after the user resumed a job paused for an unwanted extension"""
+        base_dir = os.path.join(SAB_CACHE_DIR, "complete_unwanted")
+        job_files = [self._create_file(os.path.join(base_dir, "job.exe"))]
+        fake_nzo = self._fake_nzo(unwanted_ext=2)
+
+        assert postproc.remove_unwanted_files(fake_nzo, job_files, base_dir) == (job_files, False)
+        assert os.path.exists(job_files[0])
+        assert not fake_nzo.fail_msg
+
+    @pytest.mark.config({"unwanted_extensions": ["exe"], "action_on_unwanted_extensions": 1})
+    def test_remove_unwanted_files_pause_action(self):
+        """The job can't be paused anymore, so the files are removed but the job is not failed"""
+        base_dir = os.path.join(SAB_CACHE_DIR, "complete_unwanted")
+        job_files = [self._create_file(os.path.join(base_dir, f)) for f in ("job.mkv", "job.exe")]
+        fake_nzo = self._fake_nzo()
+
+        assert postproc.remove_unwanted_files(fake_nzo, job_files, base_dir) == ([job_files[0]], False)
+        assert not os.path.exists(job_files[1])
+        assert not fake_nzo.fail_msg
+        fake_nzo.set_unpack_info.assert_called_once()
+
+    @pytest.mark.config({"unwanted_extensions": ["exe"], "action_on_unwanted_extensions": 2})
+    def test_remove_unwanted_files_fail_action(self):
+        """With the fail action, the files are removed and the job is marked as failed"""
+        base_dir = os.path.join(SAB_CACHE_DIR, "complete_unwanted")
+        job_files = [self._create_file(os.path.join(base_dir, f)) for f in ("job.mkv", "job.exe")]
+        fake_nzo = self._fake_nzo()
+
+        assert postproc.remove_unwanted_files(fake_nzo, job_files, base_dir) == ([job_files[0]], True)
+        assert not os.path.exists(job_files[1])
+        assert fake_nzo.fail_msg == "Aborted, unwanted extension detected"
+        fake_nzo.set_unpack_info.assert_called_once()
+
+    @pytest.mark.config({"unwanted_extensions": ["exe"], "action_on_unwanted_extensions": 2})
+    def test_remove_unwanted_files_keeps_earlier_fail_msg(self):
+        """The reason of an earlier failure of the job is not overwritten"""
+        base_dir = os.path.join(SAB_CACHE_DIR, "complete_unwanted")
+        job_files = [self._create_file(os.path.join(base_dir, "job.exe"))]
+        fake_nzo = self._fake_nzo()
+        fake_nzo.fail_msg = "Earlier failure"
+
+        assert postproc.remove_unwanted_files(fake_nzo, job_files, base_dir) == ([], True)
+        assert not os.path.exists(job_files[0])
+        assert fake_nzo.fail_msg == "Earlier failure"
+
+    @pytest.mark.config({"unwanted_extensions": ["exe"], "action_on_unwanted_extensions": 2})
+    def test_remove_unwanted_files_nothing_unwanted(self):
+        """A clean job is left alone and not failed"""
+        base_dir = os.path.join(SAB_CACHE_DIR, "complete_unwanted")
+        job_files = [self._create_file(os.path.join(base_dir, f)) for f in ("job.mkv", "job.srt")]
+        fake_nzo = self._fake_nzo()
+
+        assert postproc.remove_unwanted_files(fake_nzo, job_files, base_dir) == (job_files, False)
+        assert not fake_nzo.fail_msg
+        fake_nzo.set_unpack_info.assert_not_called()
+
+    @pytest.mark.config({"unwanted_extensions": ["exe"], "action_on_unwanted_extensions": 2})
+    def test_remove_unwanted_files_after_deobfuscate(self):
+        """An extensionless executable only gets its extension from deobfuscation,
+        so it must be caught by the check that runs after the files were renamed"""
+        base_dir = os.path.join(SAB_CACHE_DIR, "complete_unwanted")
+        # Start of a DOS/PE header, enough for the content to be recognized as an executable
+        exe_content = bytes.fromhex("4d5a90000300000004000000ffff0000") + bytes(240) + b"PE" + bytes(2)
+        job_files = [
+            self._create_file(os.path.join(base_dir, f), exe_content) for f in ("Obfuscated_Job", "Obfuscated_Job.mkv")
+        ]
+        fake_nzo = self._fake_nzo()
+
+        # Nothing to remove yet, the executable is hiding without an extension
+        assert postproc.remove_unwanted_files(fake_nzo, job_files, base_dir) == (job_files, False)
+
+        # Deobfuscation detects the executable and adds the extension
+        newfiles = deobfuscate(fake_nzo, job_files, fake_nzo.final_name)
+        exe_file = job_files[0] + ".exe"
+        assert not os.path.exists(job_files[0])
+        assert os.path.exists(exe_file)
+        assert sorted(newfiles) == sorted([exe_file, job_files[1]])
+
+        assert postproc.remove_unwanted_files(fake_nzo, newfiles, base_dir) == ([job_files[1]], True)
+        assert not os.path.exists(exe_file)
+        assert os.path.exists(job_files[1])
+        assert fake_nzo.fail_msg == "Aborted, unwanted extension detected"
+
+
+class TestNzbOnlyDownload:
+    @mock.patch("sabnzbd.postproc.process_single_nzb")
+    @mock.patch("sabnzbd.postproc.listdir_full")
+    def test_process_nzb_only_download_single_nzb(self, mock_listdir, mock_process_single_nzb):
+        """Test process_nzb_only_download with a single NZB file"""
+        # Setup mock NZO
+        fake_nzo = make_mock_nzo(
+            final_name="TestDownload",
+            pp=3,
+            script="test_script.py",
+            cat="movies",
+            url="http://example.com/test.nzb",
+            priority=0,
+        )
+
+        # Mock single NZB file
+        workdir = os.path.join(SAB_CACHE_DIR, "test_workdir")
+        nzb_file = os.path.join(workdir, "test.nzb")
+        mock_listdir.return_value = [nzb_file]
+
+        # Call the function
+        result = postproc.process_nzb_only_download(workdir, fake_nzo)
+
+        # Verify result
+        assert result == [nzb_file]
+
+        # Verify process_single_nzb was called with correct arguments
+        mock_process_single_nzb.assert_called_once_with(
+            "test.nzb",
+            nzb_file,
+            pp=3,
+            script="test_script.py",
+            cat="movies",
+            url="http://example.com/test.nzb",
+            priority=0,
+            nzbname="TestDownload",
+            dup_check=False,
+        )
+
+    @mock.patch("sabnzbd.postproc.process_single_nzb")
+    @mock.patch("sabnzbd.postproc.listdir_full")
+    def test_process_nzb_only_download_multiple_nzbs(self, mock_listdir, mock_process_single_nzb):
+        """Test process_nzb_only_download with multiple NZB files"""
+        # Setup mock NZO
+        fake_nzo = make_mock_nzo(
+            final_name="TestDownload",
+            pp=2,
+            script=None,
+            cat="tv",
+            url="http://example.com/test.nzb",
+            priority=1,
+        )
+
+        # Mock multiple NZB files
+        workdir = os.path.join(SAB_CACHE_DIR, "test_workdir")
+        first_nzb = os.path.join(workdir, "first.nzb")
+        second_nzb = os.path.join(workdir, "second.nzb")
+        mock_listdir.return_value = [first_nzb, second_nzb]
+
+        # Call the function
+        result = postproc.process_nzb_only_download(workdir, fake_nzo)
+
+        # Verify result
+        assert result == [first_nzb, second_nzb]
+
+        # Verify process_single_nzb was called twice with correct arguments
+        assert mock_process_single_nzb.call_count == 2
+        mock_process_single_nzb.assert_any_call(
+            "first.nzb",
+            first_nzb,
+            pp=2,
+            script=None,
+            cat="tv",
+            url="http://example.com/test.nzb",
+            priority=1,
+            nzbname="TestDownload - first.nzb",
+            dup_check=False,
+        )
+        mock_process_single_nzb.assert_any_call(
+            "second.nzb",
+            second_nzb,
+            pp=2,
+            script=None,
+            cat="tv",
+            url="http://example.com/test.nzb",
+            priority=1,
+            nzbname="TestDownload - second.nzb",
+            dup_check=False,
+        )
+
+    @mock.patch("sabnzbd.postproc.process_single_nzb")
+    @mock.patch("sabnzbd.postproc.listdir_full")
+    def test_process_nzb_only_download_mixed_files(self, mock_listdir, mock_process_single_nzb):
+        """Test process_nzb_only_download with mixed file types returns None"""
+        # Setup mock NZO
+        fake_nzo = make_mock_nzo(final_name="TestDownload")
+
+        # Mock mixed files (NZB and non-NZB)
+        workdir = os.path.join(SAB_CACHE_DIR, "test_workdir")
+        mock_listdir.return_value = [
+            os.path.join(workdir, "test.nzb"),
+            os.path.join(workdir, "readme.txt"),
+        ]
+
+        # Call the function
+        result = postproc.process_nzb_only_download(workdir, fake_nzo)
+
+        # Verify result is None (not NZB-only)
+        assert result is None
+
+        # Verify process_single_nzb was NOT called
+        mock_process_single_nzb.assert_not_called()
+
+    @mock.patch("sabnzbd.postproc.process_single_nzb")
+    @mock.patch("sabnzbd.postproc.listdir_full")
+    def test_process_nzb_only_download_empty_directory(self, mock_listdir, mock_process_single_nzb):
+        """Test process_nzb_only_download with empty directory returns None"""
+        # Setup mock NZO
+        fake_nzo = make_mock_nzo(final_name="TestDownload")
+
+        # Mock empty directory
+        workdir = os.path.join(SAB_CACHE_DIR, "test_workdir")
+        mock_listdir.return_value = []
+
+        # Call the function
+        result = postproc.process_nzb_only_download(workdir, fake_nzo)
+
+        # Verify result is None (no files)
+        assert result is None
+
+        # Verify process_single_nzb was NOT called
+        mock_process_single_nzb.assert_not_called()
+
+
+class TestProcessJobMissingArticles:
+    """Verdict of process_job for jobs that finished downloading with missing articles"""
+
+    @staticmethod
+    def _make_nzo(bytes_missing: int, extrapars: dict, unpack: bool = False) -> mock.Mock:
+        nzo = make_mock_nzo(
+            bytes=10000,
+            bytes_missing=bytes_missing,
+            bad_articles=1 if bytes_missing else 0,
+            extrapars=extrapars,
+            repair=True,
+            unpack=unpack,
+            script="",
+            final_name="test_job",
+            pp_active=True,
+        )
+        nzo.check_availability_ratio = functools.partial(NzbObject.check_availability_ratio, nzo)
+        return nzo
+
+    @staticmethod
+    def _process_job(
+        nzo: mock.Mock, rars: list[str] = (), unpack_error: int = 0, re_add: bool = False
+    ) -> dict[str, mock.Mock]:
+        file_sorter = mock.Mock()
+        file_sorter.sorter_active = False
+        with (
+            mock.patch.multiple(
+                "sabnzbd.postproc",
+                globber=mock.DEFAULT,
+                parring=mock.DEFAULT,
+                build_filelists=mock.DEFAULT,
+                unpacker=mock.DEFAULT,
+                remove_unwanted_files=mock.DEFAULT,
+                wait_for_direct_unpacker=mock.DEFAULT,
+                sanitize_files=mock.DEFAULT,
+                fix_unix_encoding=mock.DEFAULT,
+                prepare_extraction_path=mock.DEFAULT,
+                listdir_full=mock.DEFAULT,
+                set_permissions=mock.DEFAULT,
+                cleanup_list=mock.DEFAULT,
+                process_nzb_only_download=mock.DEFAULT,
+                one_file_or_folder=mock.DEFAULT,
+                remove_samples=mock.DEFAULT,
+                deobfuscate=mock.DEFAULT,
+                make_script_path=mock.DEFAULT,
+                try_alt_nzb=mock.DEFAULT,
+                notifier=mock.DEFAULT,
+                emailer=mock.DEFAULT,
+                history_updated=mock.DEFAULT,
+            ) as mocks,
+            mock.patch.object(sabnzbd, "NzbQueue", create=True),
+            mock.patch.object(sabnzbd, "db_pool", create=True),
+        ):
+            mocks["globber"].return_value = ["file_one", "file_two"]
+            mocks["parring"].return_value = (False, re_add)
+            mocks["build_filelists"].return_value = ([], list(rars), [], [], [])
+            mocks["unpacker"].return_value = (unpack_error, [])
+            mocks["remove_unwanted_files"].return_value = ([], False)
+            mocks["prepare_extraction_path"].return_value = (
+                os.path.join(SAB_CACHE_DIR, "_UNPACK_test_job"),
+                os.path.join(SAB_CACHE_DIR, "test_job"),
+                file_sorter,
+                False,
+                None,
+            )
+            mocks["listdir_full"].return_value = []
+            mocks["cleanup_list"].return_value = []
+            mocks["process_nzb_only_download"].return_value = None
+            mocks["make_script_path"].return_value = None
+            mocks["one_file_or_folder"].return_value = os.path.join(SAB_CACHE_DIR, "test_job")
+            postproc.process_job(nzo)
+        return mocks
+
+    def test_missing_articles_without_par2_is_failed(self):
+        nzo = self._make_nzo(bytes_missing=1000, extrapars={})
+        self._process_job(nzo)
+        assert nzo.status == Status.FAILED
+        assert nzo.fail_msg
+
+    def test_single_missing_article_without_par2_is_failed(self):
+        # MAX_BAD_ARTICLES does not apply, nothing else would detect the damage in a non-archive file
+        nzo = self._make_nzo(bytes_missing=1, extrapars={}, unpack=True)
+        mocks = self._process_job(nzo)
+        assert nzo.status == Status.FAILED
+        assert nzo.fail_msg
+        mocks["unpacker"].assert_not_called()
+
+    def test_missing_articles_without_par2_with_rars_is_left_to_unpack(self):
+        # Unrar can rebuild damaged volumes from REV files
+        nzo = self._make_nzo(bytes_missing=1000, extrapars={}, unpack=True)
+        mocks = self._process_job(nzo, rars=["test_job.rar"])
+        mocks["unpacker"].assert_called_once()
+        assert nzo.status == Status.COMPLETED
+        assert not nzo.fail_msg
+
+    def test_missing_articles_without_par2_with_rars_fails_when_unpack_fails(self):
+        nzo = self._make_nzo(bytes_missing=1000, extrapars={}, unpack=True)
+        mocks = self._process_job(nzo, rars=["test_job.rar"], unpack_error=1)
+        mocks["unpacker"].assert_called_once()
+        assert nzo.status == Status.FAILED
+
+    def test_missing_articles_without_par2_with_rars_is_failed_without_unpack(self):
+        nzo = self._make_nzo(bytes_missing=1000, extrapars={})
+        self._process_job(nzo, rars=["test_job.rar"])
+        assert nzo.status == Status.FAILED
+        assert nzo.fail_msg
+
+    def test_missing_articles_without_par2_with_rars_is_failed_when_unrar_disabled(self):
+        nzo = self._make_nzo(bytes_missing=1000, extrapars={}, unpack=True)
+        with mock.patch.object(sabnzbd.cfg.enable_unrar, "get", return_value=False):
+            mocks = self._process_job(nzo, rars=["test_job.rar"])
+        assert nzo.status == Status.FAILED
+        assert nzo.fail_msg
+        mocks["unpacker"].assert_not_called()
+
+    def test_missing_articles_with_par2_is_completed(self):
+        # Repair either succeeded or par_error already failed the job
+        nzo = self._make_nzo(bytes_missing=1000, extrapars={"test_job": []})
+        self._process_job(nzo)
+        assert nzo.status == Status.COMPLETED
+        assert not nzo.fail_msg
+
+    def test_a_job_readded_for_more_par2_keeps_its_repair_session(self):
+        nzo = self._make_nzo(bytes_missing=1000, extrapars={"test_job": []})
+        session = mock.Mock()
+        nzo.par2_sessions = {"test_job": session}
+        self._process_job(nzo, re_add=True)
+        assert nzo.par2_sessions == {"test_job": session}
+        session.close.assert_not_called()
+
+    def test_a_finished_job_releases_its_repair_session(self):
+        nzo = self._make_nzo(bytes_missing=1000, extrapars={"test_job": []})
+        session = mock.Mock()
+        nzo.par2_sessions = {"test_job": session}
+        self._process_job(nzo)
+        assert nzo.par2_sessions == {}
+        session.close.assert_called_once()
+
+    def test_no_missing_articles_without_par2_is_completed(self):
+        nzo = self._make_nzo(bytes_missing=0, extrapars={})
+        self._process_job(nzo)
+        assert nzo.status == Status.COMPLETED
+        assert not nzo.fail_msg
+
+    def test_missing_articles_without_par2_is_completed_when_unsafe(self):
+        nzo = self._make_nzo(bytes_missing=1000, extrapars={})
+        with mock.patch.object(sabnzbd.cfg.safe_postproc, "get", return_value=False):
+            self._process_job(nzo)
+        assert nzo.status == Status.COMPLETED
+        assert not nzo.fail_msg

@@ -7,6 +7,10 @@
     padding-right: 8px;
 }
 
+.container-full-width .container {
+    width: 100%;
+}
+
 .main-navbar {
     margin-top: 0;
     padding: 0;
@@ -18,7 +22,8 @@
 
 .main-content {
     border: 0;
-    margin-bottom: 0 !important;
+    margin: 0;
+    padding: 0;
 }
 
 .main-menu-link .icon-bar:first-child {
@@ -70,6 +75,10 @@ h2 {
     QUEUE & HISTORY
 **/
 
+.history-queue-swicher {
+    margin-bottom: 0;
+}
+
 .info-container {
     margin-top: 0px;
     margin-bottom: 10px;
@@ -91,13 +100,6 @@ h2 {
     white-space: pre;
 }
 
-.info-container .info-container-box-sorting {
-    position: absolute;
-    right: 10px;
-    top: 0px;
-    font-size: 1em;
-}
-
 .queue-table .table-header-progress {
     width: 0%;
 }
@@ -109,6 +111,11 @@ h2 {
 
 .queue-table .no-downloads tr td {
     height: 2em;
+}
+
+.no-downloads-actions {
+    flex-direction: column;
+    gap: 0.5em;
 }
 
 .queue-table .progress-indicator {
@@ -124,7 +131,7 @@ h2 {
 }
 
 .queue-table .progress {
-    margin: 0px 8px;
+    margin: 0px 15px;
 }
 
 .queue-table td.name .row-wrap-text,
@@ -147,6 +154,9 @@ tr.queue-item>td:first-child>a {
 
 .queue-table td.name .name-options {
     display: inline-block;
+    opacity: 1;
+    pointer-events: auto;
+    position: static;
 }
 
 .queue-table td.name .name-options small {
@@ -163,7 +173,7 @@ tr.queue-item>td:first-child>a {
 }
 
 .multioperations-selector .add-nzb-inputbox-small {
-    width: 72px;
+    width: 115px;
 }
 
 .multioperations-selector .add-nzb-inputbox-clear {
@@ -178,14 +188,6 @@ tr.queue-item>td:first-child>a {
 .table-messages strong {
     margin-right: 5px;
     min-width: 0px;
-}
-
-.history-table .history-ratings {
-    display: none;
-}
-
-.name-has-ratings .row-wrap-text {
-    max-width: calc(100% - 1px) !important;
 }
 
 .history-table .delete .dropdown-menu {

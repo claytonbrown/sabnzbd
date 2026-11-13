@@ -1,25 +1,39 @@
-<div class="history" id="history-tab" data-bind="visible: hasHistory() || displayTabbed()" style="display: none">
-    <h2>$T('menu-history')</h2>
-    <table class="table table-hover history-table paginated">
+<div class="history" id="history-tab">
+    <div class="history-header">
+        <h2>$T('menu-history') <small data-bind="visible: history.showArchive()">($T('archive'))</small></h2>
+        <a href="#" aria-label="$T('Glitter-multiOperations')" data-bind="click: history.showMultiEdit, visible: hasHistory()">
+            <span class="glyphicon glyphicon-tasks" data-tooltip="true" data-placement="left" title="$T('Glitter-multiOperations')"></span>
+        </a>
+    </div>
+    <table class="table table-hover history-table paginated" aria-label="$T('menu-history')">
         <thead>
             <tr>
-                <th style="width: 25px;"></th>
-                <th></th>
-                <th class="table-status-header" data-bind="css: { 'table-header-status-smaller' : extraHistoryColumns().length }"></th>
+                <th scope="col" style="width: 25px;"><span class="sr-only">$T('Glitter-result')</span></th>
+                <th scope="col"><span class="sr-only">$T('name')</span></th>
+                <th class="table-status-header" scope="col" data-bind="css: { 'table-header-status-smaller' : extraHistoryColumns().length || displayCompact() }"><span class="sr-only">$T('status')</span></th>
                 <!-- ko foreach: extraHistoryColumns -->
-                <th class="table-header-extra"></th>
+                <th class="table-header-extra" scope="col"><span class="sr-only" data-bind="text: glitterTranslate.column[\$data]"></span></th>
                 <!-- /ko -->
-                <th style="width: 130px;"></th>
-                <th style="width: 60px;"></th>
+                <th scope="col" style="width: 130px;"><span class="sr-only">$T('post-Completed')</span></th>
+                <th scope="col" style="width: 60px;"><span class="sr-only">$T('Glitter-actions')</span></th>
             </tr>
         </thead>
-        <tbody data-bind="foreach: history.historyItems">
+        <!-- ko if: !hasHistory() -->
+        <tbody class="no-downloads">
+            <tr>
+                <td colspan="6" data-bind="attr: { 'colspan': 5 + extraHistoryColumns().length }">
+                    <span>$T('empty')</span>
+                </td>
+            </tr>
+        </tbody>
+        <!-- /ko -->
+        <tbody data-bind="foreach: history.historyItems, visible: hasHistory()" style="display: none;">
             <tr class="history-item" data-bind="css: {'history-failed-download':failed()}">
                 <td>
-                    <div data-bind="visible: processingWaiting()">
-                        <span class="glyphicon glyphicon-time"></span>
+                    <div role="img" aria-label="$T('post-Queued')" data-bind="visible: processingWaiting()">
+                        <span class="glyphicon glyphicon-time" aria-hidden="true"></span>
                     </div>
-                    <div data-bind="visible: processingDownload()">
+                    <div role="img" aria-label="$T('stage-download')" data-bind="visible: processingDownload()">
                         <div class="processing-download">
                             <div class="loader-bar-one"></div>
                             <div class="loader-bar-two"></div>
@@ -27,116 +41,25 @@
                             <div class="loader-bar-four"></div>
                         </div>
                     </div>
-                    <div data-bind="visible: (!failed() && !processingDownload() && !processingWaiting())">
-                        <span class="glyphicon glyphicon-ok"></span>
+                    <div role="img" aria-label="$T('post-Completed')" data-bind="visible: (!failed() && !processingDownload() && !processingWaiting())">
+                        <span class="glyphicon glyphicon-ok" aria-hidden="true"></span>
                     </div>
                     <div data-bind="visible: failed() && canRetry()">
-                        <a class="retry-button" href="#" data-bind="click: retry">
-                            <span class="glyphicon glyphicon-exclamation-sign"></span>
+                        <a class="retry-button" href="#" aria-label="$T('button-retry')" data-bind="click: retry">
+                            <span class="glyphicon glyphicon-exclamation-sign" aria-hidden="true"></span>
                         </a>
                     </div>
                     <div data-bind="visible: failed() && !canRetry()">
-                        <span class="retry-button-inactive">
-                            <span class="glyphicon glyphicon-exclamation-sign"></span>
+                        <span class="retry-button-inactive" role="img" aria-label="$T('post-Failed')">
+                            <span class="glyphicon glyphicon-exclamation-sign" aria-hidden="true"></span>
                         </span>
                     </div>
                 </td>
-                <td class="name" data-bind="css: { 'name-has-ratings' : historyStatus.has_rating }">
+                <td class="name">
                     <div class="row-wrap-text">
                         <a class="retry-buttontext" href="#" data-bind="visible: (failed() && canRetry()), click: retry">$T('button-retry')</a>
                         <span data-bind="text: historyStatus.name, attr: { 'title': historyStatus.name() }"></span>
                     </div>
-
-                    <!-- ko if: historyStatus.has_rating -->
-                    <div class="dropdown history-ratings">
-                        <a href="#" class="name-icons hover-button" data-toggle="dropdown" onclick="keepOpen(this)">
-                            <span class="glyphicon glyphicon-thumbs-up"></span> <span data-bind="text: historyStatus.rating_avg_vote_up"></span>
-                            <span class="glyphicon glyphicon-thumbs-down"></span> <span data-bind="text: historyStatus.rating_avg_vote_down"></span>
-                        </a>
-                        <ul class="dropdown-menu history-ratings-menu">
-                            <li>
-                                <form class="history-ratings-basic">
-                                    <label>
-                                        <input type="radio" value="up" data-bind="attr: { 'name': 'ratings-status-'+nzo_id, 'checked': historyStatus.rating_user_vote() == 1 }, event: { change: setUserVote }" />
-                                        <span class="glyphicon glyphicon-thumbs-up"></span>
-                                        <span data-bind="text: historyStatus.rating_avg_vote_up"></span>
-                                    </label>
-                                    <label>
-                                        <input type="radio" value="down" data-bind="attr: { 'name': 'ratings-status-'+nzo_id, 'checked': historyStatus.rating_user_vote() == 2 }, event: { change: setUserVote }" />
-                                        <span class="glyphicon glyphicon-thumbs-down"></span>
-                                        <span data-bind="text: historyStatus.rating_avg_vote_down"></span>
-                                    </label>
-                                    <label>
-                                        <span class="glyphicon glyphicon-facetime-video"></span>
-                                        <select name="ratings-video" data-bind="value: historyStatus.rating_user_video, event: { change: setUserRating }, disable: historyStatus.rating_user_video">
-                                            <option value="">&nbsp;</option>
-                                            <option value="1">1</option>
-                                            <option value="2">2</option>
-                                            <option value="3">3</option>
-                                            <option value="4">4</option>
-                                            <option value="5">5</option>
-                                            <option value="6">6</option>
-                                            <option value="7">7</option>
-                                            <option value="8">8</option>
-                                            <option value="9">9</option>
-                                            <option value="10">10</option>
-                                        </select>
-                                    </label>
-                                    <label>
-                                        <span class="glyphicon glyphicon-volume-up"></span>
-                                        <select name="ratings-audio" data-bind="value: historyStatus.rating_user_audio, event: { change: setUserRating }, disable: historyStatus.rating_user_audio">
-                                            <option value="">&nbsp;</option>
-                                            <option value="1">1</option>
-                                            <option value="2">2</option>
-                                            <option value="3">3</option>
-                                            <option value="4">4</option>
-                                            <option value="5">5</option>
-                                            <option value="6">6</option>
-                                            <option value="7">7</option>
-                                            <option value="8">8</option>
-                                            <option value="9">9</option>
-                                            <option value="10">10</option>
-                                        </select>
-                                    </label>
-                                    <!-- ko if: historyStatus.url_info -->
-                                    <a href="#" target="_blank" data-bind="attr: { 'href':historyStatus.url_info }" title="$T('Glitter-openInfoURL')"><span class="glyphicon glyphicon-globe"></span></a>
-                                    <!-- /ko -->
-                                </form>
-                            </li>
-                            <li class="divider"></li>
-                            <li>
-                                <form class="history-ratings-report" data-bind="submit: setUserReport">
-                                    <strong>$T('report')</strong>
-                                    <br />
-                                    <label>
-                                        <input type="radio" name="rating_flag" value="spam" /> $T('spam')
-                                    </label>
-                                    <br />
-                                    <label>
-                                        <input type="radio" name="rating_flag" value="encrypted" /> $T('encrypted')
-                                    </label>
-                                    <br />
-                                    <label>
-                                        <input type="radio" name="rating_flag" value="expired" /> $T('expired')
-                                        <select name="ratings-report-expired-server" class="ratings-report-hidden form-control" data-bind="options: \$parent.servers, optionsText: 'host', optionsValue: 'host', optionsCaption: '$T('nzo-all')'"></select>
-                                    </label>
-                                    <br />
-                                    <label>
-                                        <input type="radio" name="rating_flag" value="other" /> $T('otherProblem')
-                                        <input type="text" class="form-control ratings-report-hidden" name="ratings-report-other" />
-                                    </label>
-                                    <br />
-                                    <label>
-                                        <input type="radio" name="rating_flag" value="comment" /> $T('comment')
-                                        <input type="text" class="form-control ratings-report-hidden" name="ratings-report-comment" />
-                                    </label>
-                                    <br />
-                                    <button type="submit" class="btn btn-default"><span class="glyphicon glyphicon-ok"></span> $T('send')</button>
-                                </form>
-                            </li>
-                        </ul>
-                    </div>
-                    <!-- /ko -->
                 </td>
                 <td class="status row-wrap-text" data-bind="text: statusText()" onclick="showDetails(this)"></td>
                 <!-- ko foreach: parent.parent.extraHistoryColumns -->
@@ -146,8 +69,11 @@
                 <!-- /ko -->
                 <td class="history-completedon row-wrap-text" data-bind="text: completedOn(), attr: { 'data-timestamp': completed }" onclick="showDetails(this)"></td>
                 <td class="delete">
-                    <div class="dropdown">
-                        <a href="#" data-toggle="dropdown" data-bind="click: updateAllHistoryInfo">
+                    <label data-bind="visible: parent.isMultiEditing()">
+                        <input type="checkbox" name="multiedit" title="$T('Glitter-multiSelect')" aria-label="$T('Glitter-selectJob')" data-bind="click: parent.addMultiEdit, attr: { 'id': 'multiedit_' + id } " />
+                    </label>
+                    <div class="dropdown" data-bind="visible: !parent.isMultiEditing()">
+                        <a href="#" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false" aria-label="$T('nzoDetails')" data-bind="click: updateAllHistoryInfo">
                             <span class="caret"></span>
                         </a>
                         <!-- ko if: hasDropdown() -->
@@ -157,13 +83,19 @@
                                     <div class="col-sm-2">$T('name')</div>
                                     <div class="col-sm-10" data-bind="text: historyStatus.name"></div>
                                 </div>
+                                <div class="row" data-bind="visible: historyStatus.time_added">
+                                    <div class="col-sm-2">$T('rss-added')</div>
+                                    <div class="col-sm-10" data-bind="text: timeAdded(), attr: { 'data-timestamp': historyStatus.time_added }"></div>
+                                </div>
                                 <div class="row">
                                     <div class="col-sm-2">$T('post-Completed')</div>
                                     <div class="col-sm-10" data-bind="text: completedOn, attr: { 'data-timestamp': completed }"></div>
                                 </div>
                                 <div class="row">
                                     <div class="col-sm-2">$T('status')</div>
-                                    <div class="col-sm-10" data-bind="text: glitterTranslate.status[historyStatus.status()] ? glitterTranslate.status[historyStatus.status()] : statusText()"></div>
+                                    <div class="col-sm-10">
+                                        <span data-bind="text: glitterTranslate.status[historyStatus.status()] ? glitterTranslate.status[historyStatus.status()] : statusText()"></span>
+                                    </div>
                                 </div>
                                 <div class="row">
                                     <div class="col-sm-2">$T('size')</div>
@@ -177,21 +109,29 @@
                                     <div class="col-sm-2">$T('srv-password')</div>
                                     <div class="col-sm-10" data-bind="text: historyStatus.password"></div>
                                 </div>
-                                <div class="row">
+                                <div class="row" data-bind="visible: historyStatus.storage() || historyStatus.path()">
                                     <div class="col-sm-2">$T('msg-path')</div>
                                     <div class="col-sm-10" data-bind="text: historyStatus.storage() == '' ? historyStatus.path : historyStatus.storage"></div>
                                 </div>
                                 <!-- ko foreach: { data: historyStatus.stage_log, afterRender: addHistoryStatusStuff } -->
                                 <div class="row">
                                     <div class="col-sm-2" data-bind="text: glitterTranslate.status[name()]"></div>
-                                    <div class="col-sm-10 history-status-modallink" data-bind="longText: actions, longTextType: name()"></div>
+                                    <div class="col-sm-10">
+                                        <span class="history-status-modallink" data-bind="longText: actions"></span>
+                                        <!-- ko if: name() == 'Script' -->
+                                        <a href="#" aria-label="$T('Glitter-scriptLog')" data-bind="click: \$parent.showScriptLog.bind(\$parent)">(<span data-bind="text: glitterTranslate.moreText"></span>)</a>
+                                        <!-- /ko -->
+                                    </div>
                                 </div>
                                 <!-- /ko -->
+                                <div class="col-sm-12 text-right" data-bind="visible: failed()">
+                                    <a href="#" class="btn btn-default mark-completed-btn" data-bind="click: markAsCompleted"><span class="glyphicon glyphicon-ok"></span> $T('button-mark-completed')</a>
+                                </div>
                             </div>
                         </div>
                         <!-- /ko -->
                     </div>
-                    <a href="#" data-bind="click: deleteSlot">
+                    <a href="#" data-bind="click: parent.triggerRemoveDownload, attr: { 'aria-label': processingDownload() == 2 ? '$T('abort')' : '$T('nzo-delete')' }">
                         <span class="hover-button glyphicon glyphicon-trash" data-bind="css: { 'glyphicon-stop' : processingDownload() == 2, disabled : processingDownload() == 1 }, attr: { title: processingDownload() == 2 ? '$T('abort')' : '$T('nzo-delete')' }"></span>
                     </a>
                 </td>
@@ -199,23 +139,45 @@
         </tbody>
     </table>
 
+    <div class="history-footer">
+
     <div class="input-group search-box">
-        <input type="text" class="form-control" placeholder="$T('Glitter-search')" required data-bind="textInput: history.searchTerm, event: { keydown: history.clearSearchTerm }" />
-        <a data-bind="event: { mousedown: history.clearSearchTerm }">
+        <input type="text" class="form-control" placeholder="$T('Glitter-search')" aria-label="$T('Glitter-search')" required data-bind="textInput: history.searchTerm, event: { keydown: history.clearSearchTerm }" />
+        <a href="#" data-tooltip="true" data-html="true" data-placement="right" title="$T('Glitter-searchExplain')" data-bind="click: history.clearSearchTerm, attr: { 'aria-label': history.searchTerm() ? '$T('Glitter-clearSearch')' : '$T('Glitter-search')' }">
             <span class="glyphicon" data-bind="css: { 'glyphicon-search' : !history.searchTerm(), 'glyphicon-remove' : history.searchTerm() }"></span>
         </a>
     </div>
 
     <ul class="pagination" data-bind="foreach: history.pagination.allpages(), visible: history.pagination.hasPagination" style="display: none;">
-        <li data-bind="css: { active: isCurrent, disabled: isDots }, click: onclick">
-            <span data-bind="text: page"></span>
+        <li data-bind="css: { active: isCurrent, disabled: isDots }">
+            <!-- ko ifnot: isDots -->
+            <a href="#" data-bind="text: page, click: onclick, attr: { 'aria-current': isCurrent ? 'page' : null }"></a>
+            <!-- /ko -->
+            <!-- ko if: isDots -->
+            <span aria-hidden="true" data-bind="text: page"></span>
+            <!-- /ko -->
         </li>
     </ul>
 
     <div class="multioperations-selector" id="history-options">
-        <a href="#" class="hover-button" title="$T('link-retryAll')" data-tooltip="true" data-placement="left" data-bind="click: history.retryAllFailed"><span class="glyphicon glyphicon-repeat"></span></a>
-        <a href="#" class="hover-button" title="$T('showAllHis') / $T('showFailedHis')" data-tooltip="true" data-placement="left" data-bind="click: history.toggleShowFailed, css: { 'history-options-show-failed': history.showFailed }"><span class="glyphicon glyphicon-exclamation-sign"></span></a>
-        <a href="#modal-purge-history" class="hover-button" title="$T('purgeHist')" data-toggle="modal" data-tooltip="true" data-placement="left"><span class="glyphicon glyphicon-trash"></span></a>
+        <a href="#" class="hover-button history-archive" title="$T('showArchive') / $T('showAllHis')" data-tooltip="true" data-placement="top" data-bind="click: history.toggleShowArchive, css: { 'history-options-show-failed': history.showArchive }"><svg viewBox="6 6 36 36" height="14" width="14" class="archive-icon"><path d="M41.09 10.45l-2.77-3.36c-.56-.66-1.39-1.09-2.32-1.09h-24c-.93 0-1.76.43-2.31 1.09l-2.77 3.36c-.58.7-.92 1.58-.92 2.55v25c0 2.21 1.79 4 4 4h28c2.21 0 4-1.79 4-4v-25c0-.97-.34-1.85-.91-2.55zm-17.09 24.55l-11-11h7v-4h8v4h7l-11 11zm-13.75-25l1.63-2h24l1.87 2h-27.5z"/></svg></a>
+        <a href="#" class="hover-button" title="$T('showFailedHis') / $T('showAllHis')" data-tooltip="true" data-placement="top" data-bind="click: history.toggleShowFailed, css: { 'history-options-show-failed': history.showFailed }"><span class="glyphicon glyphicon-exclamation-sign"></span></a>
+        <a href="#" class="hover-button" title="$T('link-retryAll')" data-tooltip="true" data-placement="top" data-bind="click: history.retryAllFailed"><span class="glyphicon glyphicon-repeat"></span></a>
+        <a href="#" class="hover-button" title="$T('button-mark-completed')" data-bind="visible: (history.isMultiEditing() && hasHistory()), click: history.doMultiMarkCompleted" data-tooltip="true" data-placement="top"><span class="glyphicon glyphicon-ok"></span></a>
+
+        <div data-bind="visible: (history.isMultiEditing() && hasHistory())">
+            <span class="label label-default" data-bind="text: history.multiEditItems().length">0</span>
+            <label for="multiedit-checkall-history">
+                <input type="checkbox" name="multieditCheckAll" id="multiedit-checkall-history" title="$T('Glitter-checkAll')" data-bind="click: history.checkAllJobs" data-tooltip="true" data-placement="top" />
+            </label>
+        </div>
+
+        <a href="#" class="hover-button" title="$T('nzo-delete')" data-bind="visible: (history.isMultiEditing() && hasHistory()), click: history.doMultiDelete"  data-tooltip="true" data-placement="top">
+            <span class="glyphicon glyphicon-trash"></span>
+        </a>
+        <a href="#modal-purge-history" class="hover-button" title="$T('purgeHist')" data-bind="visible: !(history.isMultiEditing() && hasHistory())" data-toggle="modal" data-tooltip="true" data-placement="top">
+            <span class="glyphicon glyphicon-trash"></span>
+        </a>
     </div>
 
     <div class="info-container history-info">
@@ -224,10 +186,6 @@
         <span data-bind="text: history.downloadedMonth"></span>B $T('Glitter-thisMonth')
         <span data-bind="text: history.downloadedTotal"></span>B $T('Glitter-total')
     </div>
-</div>
-<div class="info-container history-info" data-bind="visible: !hasHistory() && !displayTabbed()" style="display: none">
-    <span class="glyphicon glyphicon-save"></span>
-    <span data-bind="text: history.downloadedToday"></span>B $T('Glitter-today')
-    <span data-bind="text: history.downloadedMonth"></span>B $T('Glitter-thisMonth')
-    <span data-bind="text: history.downloadedTotal"></span>B $T('Glitter-total')
+
+    </div><!-- /.history-footer -->
 </div>

@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -OO
-# Copyright 2007-2021 The SABnzbd-Team <team@sabnzbd.org>
+# Copyright 2007-2026 by The SABnzbd-Team (sabnzbd.org)
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -31,6 +31,7 @@ except ImportError:
 
 import sabnzbd
 import sabnzbd.cfg as cfg
+from sabnzbd.constants import DEF_PORT
 from sabnzbd.encoding import utob
 
 PANIC_PORT = 1
@@ -39,6 +40,7 @@ PANIC_QUEUE = 3
 PANIC_OTHER = 5
 PANIC_SQLITE = 7
 PANIC_HOST = 8
+PANIC_PORT_PERMISSION = 9
 
 
 def MSG_BAD_NEWS():
@@ -66,14 +68,12 @@ def MSG_BAD_NEWS():
 
 def MSG_BAD_PORT():
     return (
-        T(
-            r"""
+        T(r"""
     SABnzbd needs a free tcp/ip port for its internal web server.<br>
     Port %s on %s was tried , but it is not available.<br>
     Some other software uses the port or SABnzbd is already running.<br>
     <br>
-    Please restart SABnzbd with a different port number."""
-        )
+    Please restart SABnzbd with a different port number.""")
         + """<br>
     <br>
     %s<br>
@@ -83,16 +83,32 @@ def MSG_BAD_PORT():
     )
 
 
+def MSG_PORT_PERMISSION():
+    return (
+        T(r"""
+    SABnzbd is not allowed to use port %s on %s.<br>
+    Low port numbers are reserved for privileged processes on most systems,
+    so the port itself is available but cannot be claimed.<br>
+    <br>
+    Either run SABnzbd with the privileges needed for that port, or restart it
+    with a port number of 1024 or higher.""")
+        + """<br>
+    <br>
+    %s<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;%s --server %s:%s<br>
+    <br>"""
+        + T(r"To keep using the low port, put a reverse proxy in front of SABnzbd instead.<br>")
+    )
+
+
 def MSG_BAD_HOST():
     return (
-        T(
-            r"""
+        T(r"""
     SABnzbd needs a valid host address for its internal web server.<br>
     You have specified an invalid address.<br>
     Safe values are <b>localhost</b> and <b>0.0.0.0</b><br>
     <br>
-    Please restart SABnzbd with a proper host address."""
-        )
+    Please restart SABnzbd with a proper host address.""")
         + """<br>
     <br>
     %s<br>
@@ -104,15 +120,13 @@ def MSG_BAD_HOST():
 
 def MSG_BAD_QUEUE():
     return (
-        T(
-            r"""
+        T(r"""
     SABnzbd detected saved data from an other SABnzbd version<br>
     but cannot re-use the data of the other program.<br><br>
     You may want to finish your queue first with the other program.<br><br>
     After that, start this program with the "--clean" option.<br>
     This will erase the current queue and history!<br>
-    SABnzbd read the file "%s"."""
-        )
+    SABnzbd read the file "%s".""")
         + """<br>
     <br>
     %s<br>
@@ -123,13 +137,11 @@ def MSG_BAD_QUEUE():
 
 
 def MSG_BAD_TEMPL():
-    return T(
-        r"""
+    return T(r"""
     SABnzbd cannot find its web interface files in %s.<br>
     Please install the program again.<br>
     <br>
-"""
-    )
+""")
 
 
 def MSG_OTHER():
@@ -137,19 +149,17 @@ def MSG_OTHER():
 
 
 def MSG_SQLITE():
-    return T(
-        r"""
+    return T(r"""
     SABnzbd detected that the file sqlite3.dll is missing.<br><br>
     Some poorly designed virus-scanners remove this file.<br>
     Please check your virus-scanner, try to re-install SABnzbd and complain to your virus-scanner vendor.<br>
     <br>
-"""
-    )
+""")
 
 
 def panic_message(panic_code, a=None, b=None):
     """Create the panic message from templates"""
-    if sabnzbd.WIN32:
+    if sabnzbd.WINDOWS:
         os_str = T("Press Startkey+R and type the line (example):")
         prog_path = '"%s"' % sabnzbd.MY_FULLNAME
     else:
@@ -168,6 +178,8 @@ def panic_message(panic_code, a=None, b=None):
         msg = MSG_SQLITE()
     elif panic_code == PANIC_HOST:
         msg = MSG_BAD_HOST() % (os_str, prog_path, "localhost", b)
+    elif panic_code == PANIC_PORT_PERMISSION:
+        msg = MSG_PORT_PERMISSION() % (b, a, os_str, prog_path, a, DEF_PORT)
     else:
         msg = MSG_OTHER() % (a, b)
 
@@ -204,6 +216,17 @@ def panic_port(host, port):
     launch_a_browser(panic_message(PANIC_PORT, host, port))
 
 
+def panic_port_permission(host, port):
+    show_error_dialog(
+        "\n%s:\n  %s"
+        % (
+            T("Fatal error"),
+            T("Not allowed to bind to port %s on %s. Low ports need elevated privileges.") % (port, host),
+        )
+    )
+    launch_a_browser(panic_message(PANIC_PORT_PERMISSION, host, port))
+
+
 def panic_host(host, port):
     launch_a_browser(panic_message(PANIC_HOST, host, port))
 
@@ -223,7 +246,7 @@ def panic(reason, remedy=""):
 
 def launch_a_browser(url, force=False):
     """Launch a browser pointing to the URL"""
-    if not force and not cfg.autobrowser() or sabnzbd.DAEMON:
+    if (not force and not cfg.autobrowser()) or sabnzbd.DAEMON:
         return
 
     if "::1" in url and "[::1]" not in url:
@@ -241,10 +264,10 @@ def launch_a_browser(url, force=False):
         if url and not url.startswith("http"):
             url = "file:///%s" % url
         if webbrowser:
-            webbrowser.open(url, 2, 1)
+            webbrowser.open(url, 2, True)
         else:
             logging.info("Not showing panic message in webbrowser, no support found")
-    except:
+    except Exception:
         logging.warning(T("Cannot launch the browser, probably not found"))
         logging.info("Traceback: ", exc_info=True)
 
@@ -253,45 +276,6 @@ def show_error_dialog(msg):
     """Show a pop-up when program cannot start
     Windows-only, otherwise only print to console
     """
-    if sabnzbd.WIN32:
+    if sabnzbd.WINDOWS:
         ctypes.windll.user32.MessageBoxW(0, msg, T("Fatal error"), 0)
     print(msg)
-
-
-def error_page_401(status, message, traceback, version):
-    """Custom handler for 401 error"""
-    title = T("Access denied")
-    body = T("Error %s: You need to provide a valid username and password.") % status
-    return r"""
-<html>
-    <head>
-    <title>%s</title>
-    </head>
-    <body>
-    <br/><br/>
-    <font color="#0000FF">%s</font>
-    </body>
-</html>
-""" % (
-        title,
-        body,
-    )
-
-
-def error_page_404(status, message, traceback, version):
-    """Custom handler for 404 error, redirect to main page"""
-    return (
-        r"""
-<html>
-    <head>
-      <script type="text/javascript">
-      <!--
-      location.href = location.protocol + '//' + location.hostname + (location.port ? ':' + location.port : '') + '%s' ;
-      //-->
-      </script>
-    </head>
-    <body><br/></body>
-</html>
-"""
-        % cfg.url_base()
-    )

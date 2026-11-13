@@ -1,10 +1,8 @@
 SABnzbd - The automated Usenet download tool
 ============================================
 
-![CI tests](https://github.com/sabnzbd/sabnzbd/workflows/CI%20Tests/badge.svg)
-![Build binaries](https://github.com/sabnzbd/sabnzbd/workflows/Build%20binaries%20and%20source%20distribution/badge.svg)
-[![License](https://img.shields.io/badge/license-GPL%20v2-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)
-
+[![License](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)
+[![Join our Discord](https://img.shields.io/discord/976737547558461480?color=7289DA&label=Discord&logo=Discord&logoColor=white)](https://discord.sabnzbd.org)
 
 SABnzbd is an Open Source Binary Newsreader written in Python.
 
@@ -18,15 +16,15 @@ If you want to know more you can head over to our website: https://sabnzbd.org.
 
 SABnzbd has a few dependencies you'll need before you can get running. If you've previously run SABnzbd from one of the various Linux packages, then you likely already have all the needed dependencies. If not, here's what you're looking for:
 
-- `python` (Python 3.7 and above, often called `python3`)
-- Python modules listed in `requirements.txt`. Install with `python3 -m pip install -r requirements.txt -U`
+- `python` (Python 3.10 and above, often called `python3`)
+- Python modules listed in `requirements.txt`. Install with `python3 -m pip install -r requirements.txt`
 - `par2` (Multi-threaded par2 installation guide can be found [here](https://sabnzbd.org/wiki/installation/multicore-par2))
 - `unrar` (make sure you get the "official" non-free version of unrar)
 
 Optional:
 - See `requirements.txt`
 
-Your package manager should supply these. If not, we've got links in our [installation guide](https://github.com/sabnzbd/sabnzbd/blob/master/INSTALL.txt).
+Your package manager should supply these. If not, we've got links in our [installation guide](https://sabnzbd.org/wiki/installation/install-off-modules).
 
 ## Running SABnzbd from source
 
@@ -68,3 +66,12 @@ Conditions:
 - Bugfixes created specifically for a release branch are done there (because they are specific, they're not cherry-picked to `develop`).
 - Bugfixes done on `develop` may be cherry-picked to a release branch.
 - We will not release a 1.0.2 if a 1.1.0 has already been released.
+
+## Privacy Policy
+
+This program will not transfer any information to other networked systems unless
+specifically requested by the user or the person installing or operating it.
+
+## Code Signing Policy
+
+For our Windows release, free code signing is provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).

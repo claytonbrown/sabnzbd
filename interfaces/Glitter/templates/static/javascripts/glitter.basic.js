@@ -23,34 +23,19 @@ if(isMobile) {
     });
 }
 
+$.ajaxSetup({
+    headers: { "X-SABnzbd-CSRF": csrfToken }
+});
+
 // Basic API-call
-function callAPI(data) {
+function callAPI(data, timeout = 10000) {
     // Fill basis var's
     data.output = "json";
-    data.apikey = apiKey;
     var ajaxQuery = $.ajax({
         url: "./api",
-        type: "GET",
-        cache: false,
+        type: "POST",
         data: data,
-        timeout: 10000 // Wait a little longer on mobile connections
-    });
-
-    return $.when(ajaxQuery);
-}
-
-// Special API call
-function callSpecialAPI(url, data) {
-    // Did we get input?
-    if(data == undefined) data = {};
-    // Fill basis var's
-    data.output = "json";
-    data.apikey = apiKey;
-    var ajaxQuery = $.ajax({
-        url: url,
-        type: "GET",
-        cache: false,
-        data: data
+        timeout: timeout
     });
 
     return $.when(ajaxQuery);
@@ -75,11 +60,11 @@ function convertHTMLtoText(htmltxt) {
 // Function to re-write 0:09:21=>9:21, 0:10:10=>10:10, 0:00:30=>0:30
 function rewriteTime(timeString) {
     // Remove "0:0" from start
-    if(timeString.substring(0,3) == '0:0') {
+    if(timeString.substring(0,3) === '0:0') {
         timeString = timeString.substring(3)
     }
     // Remove "0:" from start
-    else if(timeString.substring(0,2) == '0:') {
+    else if(timeString.substring(0,2) === '0:') {
         timeString = timeString.substring(2)
     }
     return timeString
@@ -88,13 +73,13 @@ function rewriteTime(timeString) {
 // How to display the date-time?
 function displayDateTime(inDate, outFormat, inFormat) {
     // What input?
-    if(inDate == '') {
+    if(inDate === '') {
         var theMoment = moment()
     } else {
         var theMoment = moment.utc(inDate, inFormat)
     }
     // Special format or regular format?
-    if(outFormat == 'fromNow') {
+    if(outFormat === 'fromNow') {
         return theMoment.fromNow()
     } else {
         return theMoment.local().format(outFormat)
@@ -172,7 +157,7 @@ function setCheckAllState(checkSelector, rangeSelector) {
     var nrChecks = allChecks.filter(":checked");
     if(nrChecks.length === 0) {
         $(checkSelector).prop({'checked': false, 'indeterminate': false})
-    } else if(nrChecks.length == allChecks.length) {
+    } else if(nrChecks.length === allChecks.length) {
         $(checkSelector).prop({'checked': true, 'indeterminate': false})
     } else {
         $(checkSelector).prop({'checked': false, 'indeterminate': true})

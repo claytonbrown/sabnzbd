@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -OO
-# Copyright 2011-2021 The SABnzbd-Team <team@sabnzbd.org>
+# Copyright 2007-2026 by The SABnzbd-Team (sabnzbd.org)
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -23,16 +23,18 @@ import os
 import sys
 import re
 
-# Import version.py without the sabnzbd overhead
-with open("sabnzbd/version.py") as version_file:
+# Make sure it's run as "python tools/extract_pot.py"
+if not os.path.exists("builder"):
+    raise RuntimeError("Make sure to run from root directory of SABnzbd")
+
+# Import a nicely parsed version file
+with open("builder/common.py") as version_file:
     exec(version_file.read())
 
 # Fixed information for the POT header
-HEADER = (
-    r"""#
+HEADER = r"""#
 # SABnzbd Translation Template file __TYPE__
-# Copyright 2011-2021 The SABnzbd-Team
-#   team@sabnzbd.org
+# Copyright 2007-2026 by The SABnzbd-Team (sabnzbd.org)
 #
 msgid ""
 msgstr ""
@@ -43,9 +45,7 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"""
-    % __version__
-)
+""" % RELEASE_VERSION_BASE
 
 PO_DIR = "po/main"
 POE_DIR = "po/email"
@@ -55,7 +55,7 @@ DOMAIN = "SABnzbd"
 DOMAIN_EMAIL = "SABemail"
 DOMAIN_NSIS = "SABnsis"
 PARMS = "-d %s -p %s -w500 -k T -k TT -o %s.pot.tmp" % (DOMAIN, PO_DIR, DOMAIN)
-FILES = "SABnzbd.py sabnzbd/*.py sabnzbd/utils/*.py"
+FILES = "SABnzbd.py sabnzbd/*.py sabnzbd/*/*.py"
 
 FILE_CACHE = {}
 
@@ -74,7 +74,7 @@ def get_a_line(line_src, number):
         # We include 2 lines extra, since sometimes the "logging.warning"
         # can be on the line above, due to code-formatting
         return "".join(FILE_CACHE[line_src][number - 3 : number])
-    except:
+    except Exception:
         return ""
 
 
@@ -86,8 +86,7 @@ def get_context(ctx_line):
     newlines = []
     contexts = []
     for item in ctx_line[2:].strip().split():
-        m = RE_LINE.search(item)
-        if m:
+        if m := RE_LINE.search(item):
             line_src = m.group(1)
             number = m.group(2)
         else:
@@ -96,14 +95,13 @@ def get_context(ctx_line):
 
         srcline = get_a_line(line_src, int(number)).strip("\r\n")
         context = ""
-        m = RE_CONTEXT.search(srcline)
-        if m:
+        if m := RE_CONTEXT.search(srcline):
             # Context was defined in the source file
             context = m.group(1)
         else:
             if "logging.error(" in srcline:
                 context = "Error message"
-            elif "logging.warning(" in srcline or "logging.warning_helpful(" in srcline:
+            elif "logging.warning(" in srcline or "helpful_warning(" in srcline:
                 context = "Warning message"
 
         if context and context not in contexts:
@@ -140,7 +138,7 @@ if not os.path.exists(PO_DIR):
 
 # Determine location of PyGetText tool
 path, py = os.path.split(sys.argv[0])
-PYGETTEXT = os.path.abspath(os.path.normpath(os.path.join(path, "pygettext.py")))
+PYGETTEXT = os.path.normpath(os.path.join(path, "pygettext.py"))
 cmd = "%s %s %s %s" % (sys.executable, PYGETTEXT, PARMS, FILES)
 os.system(cmd)
 print("Finished creating POT file")
@@ -184,8 +182,8 @@ if os.path.exists(NSIS):
     print("Creating NSIS POT file")
     if not os.path.exists(PON_DIR):
         os.makedirs(PON_DIR)
-    src = open(NSIS, "r")
-    dst = open(os.path.join(PON_DIR, DOMAIN_NSIS + ".pot"), "w")
+    src = open(NSIS, "r", encoding="utf-8-sig")
+    dst = open(os.path.join(PON_DIR, DOMAIN_NSIS + ".pot"), "w", encoding="utf-8")
     dst.write(HEADER.replace("__TYPE__", "NSIS"))
     dst.write("\n")
     for line in src:

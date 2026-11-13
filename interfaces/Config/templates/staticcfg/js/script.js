@@ -60,6 +60,7 @@
         // Initialize
         this.element = $(element);
         this.initialDir = null;
+        this.showFiles = false;
         this.currentBrowserPath = null;
         this.currentRequest = null;
         this.fileBrowserDialog = $('#filebrowser_modal .modal-body');
@@ -99,6 +100,11 @@
             this.initialDir = this.element.data('initialdir') + folderSeperator + this.element.val();
         }
 
+        // Are we selecting files or folders
+        if(this.element.data('files')) {
+            this.showFiles = true
+        }
+
         // Browse
         this.browse(this.initialDir , folderBrowseUrl);
 
@@ -109,13 +115,13 @@
                 // Remove start
                 self.currentBrowserPath = self.currentBrowserPath.replace(self.element.data('initialdir')+folderSeperator, '');
                 // If it's identical to the initial dir the replacement won't work
-                if(self.currentBrowserPath == self.element.data('initialdir')) {
+                if(self.currentBrowserPath === self.element.data('initialdir')) {
                     self.currentBrowserPath = '';
                 }
             }
 
             // Changed?
-            if(self.element.val() != self.currentBrowserPath) {
+            if(self.element.val() !== self.currentBrowserPath) {
                 self.element.val(self.currentBrowserPath);
                 formHasChanged = true;
             }
@@ -144,12 +150,20 @@
         // Still loading
         if (this.currentRequest) this.currentRequest.abort();
 
-        // Show hidden folders on Linux?
-        var extraHidden = $('#show_hidden_folders').is(':checked') ? '&show_hidden_folders=1' : '';
+        // Show hidden folders
+        var params = { name: path}
+        if($('#show_hidden_folders').is(':checked')) {
+            params['show_hidden_folders'] = "1"
+        }
+
+        // Show files?
+        if(this.showFiles) {
+            params['show_files'] = "1"
+        }
 
         // Get current folders
         this.currentBrowserPath = path;
-        this.currentRequest = $.getJSON(endpoint + extraHidden, { name: path }, function (data) {
+        this.currentRequest = $.getJSON(endpoint, params, function (data) {
             // Clean
             self.fileBrowserDialog.empty();
 
@@ -157,17 +171,27 @@
             var list = $('<div class="list-group">').appendTo(self.fileBrowserDialog);
             $.each(data.paths, function (i, entry) {
                 // Title for first one
-                if(i == 0) {
+                if(i === 0) {
                     self.fileBrowserDialog.prepend($('<h4>').text(entry.current_path))
                     return
                 }
                 // Regular link
                 link = $('<a class="list-group-item" href="javascript:void(0)" />').click(function () {
-                    self.browse(entry.path, endpoint); }
-                ).text(entry.name);
+                    // Are we looking for files and did we select a file?
+                    if(self.showFiles && !entry.dir) {
+                        // Trigger selection
+                        self.currentBrowserPath = entry.path
+                        $('#filebrowser_modal_accept').click()
+                    } else {
+                        self.browse(entry.path, endpoint);
+                    }
+                }).text(entry.name);
+
                 // Back image
-                if(entry.name == '..') {
+                if(entry.name === '..') {
                     $('<span class="glyphicon glyphicon-arrow-left"></span> ').prependTo(link);
+                } else if(!entry.dir) {
+                    $('<span class="glyphicon glyphicon-file"></span> ').prependTo(link);
                 } else {
                     $('<span class="glyphicon glyphicon-folder-open"></span> ').prependTo(link);
                 }
@@ -203,7 +227,12 @@ $.fn.extractFormDataTo = function(target) {
     var selects = $("select", this);
 
     selects.each(function (i,elem) {
-        target[elem.name] = elem.value;
+        if (elem.selectedOptions.length > 1) {
+            // Handle <select multiple="multiple">
+            target[elem.name] = Array.from(elem.selectedOptions).map(({ value }) => value).toString();
+        } else {
+            target[elem.name] = elem.value;
+        }
     });
 
     return this;
@@ -214,8 +243,13 @@ $.fn.extractFormDataTo = function(target) {
  *
  * (c) 2015 SABnzbd Team, Inc. All rights reserved.
  */
+
+$.ajaxSetup({
+    headers: { "X-SABnzbd-CSRF": csrfToken }
+});
+
 function config_success() {
-    $('.saveButton').each(function () {
+    $('.saveButton[disabled=disabled]').each(function () {
         $(this).removeAttr("disabled").html('<span class="glyphicon glyphicon-ok"></span> '+configTranslate.saveChanges);
     });
     // Let us leave!
@@ -223,18 +257,30 @@ function config_success() {
     formHasChanged = false;
 }
 function config_failure() {
-    $('.saveButton').each(function () {
+    $('.saveButton[disabled=disabled]').each(function () {
         $(this).removeAttr("disabled").addClass('btn-danger').html('<span class="glyphicon glyphicon-remove"></span> '+configTranslate.failed);
     });
     // Can't go yet..
     formWasSubmitted = false;
 }
+
+function loadFavicons() {
+    $('.favicon').each(function(i, container) {
+        var faviconUrl = '//' + $(container).data('domain') + '/favicon.ico'
+        var faviconImage = new Image()
+        faviconImage.src = faviconUrl
+        faviconImage.onerror = function() {
+            $(container).append('<span class="glyphicon glyphicon-list"></span>')
+        }
+    })
+}
 function do_restart() {
     // Show overlay
     $('.main-restarting').show()
 
-    // What template
-    var switchedHTTPS = ($('#enable_https').is(':checked') == ($('#enable_https').data('original') === undefined))
+    // Check if we need redirect
+    // Uses == on purpose, because val() returns string and data() returns int!
+    var switchedHTTPS = ($('#enable_https').is(':checked') === ($('#enable_https').data('original') === undefined))
     var portsUnchanged  = ($('#port').val() == $('#port').data('original')) && ($('#https_port').val() == $('#https_port').data('original'))
 
     // Are we on settings page or did nothing change?
@@ -243,7 +289,7 @@ function do_restart() {
         var urlTotal = window.location.origin + urlBase
     } else {
         // Protocol and port depend on http(s) setting
-        if($('#enable_https').is(':checked') && (window.location.protocol == 'https:' || !$('#https_port').val())) {
+        if($('#enable_https').is(':checked') && (window.location.protocol === 'https:' || !$('#https_port').val())) {
             // Https on and we visited this page from HTTPS
             var urlProtocol = 'https:';
             var urlPort = $('#https_port').val() ? $('#https_port').val() : $('#port').val();
@@ -261,7 +307,7 @@ function do_restart() {
     $('.main-restarting .restarting-url').text(urlTotal)
 
     // Initiate restart
-    $.ajax({ url: '../../api?mode=restart&apikey=' + sabSession,
+    $.ajax({ url: rootURL + 'api?mode=restart', type: 'POST',
         complete: function() {
             // Keep counter of failures
             var loopCounter = 0;
@@ -292,7 +338,7 @@ function do_restart() {
 
             // Exception if we go from HTTPS to HTTP
             // (this is not allowed by browsers and all of the above will be ignored)
-            if(window.location.protocol != urlProtocol) {
+            if(window.location.protocol !== urlProtocol) {
                 // Saftey redirect after 20 sec
                 setTimeout(function() {
                     location.href = urlTotal;
@@ -301,8 +347,15 @@ function do_restart() {
         }
     });
 }
+// New credentials take effect at once, so this session no longer has access
+function go_to_login() {
+    // Let us leave without the unsaved-changes prompt
+    formWasSubmitted = true;
+    formHasChanged = false;
+    location.href = rootURL + 'login';
+}
 
-// Remove obfusication
+// Remove obfuscation
 function removeObfuscation() {
     $('input[data-hide]').each(function(index, objInput) {
         $(objInput).attr('name', $(objInput).data('hide'))
@@ -310,15 +363,39 @@ function removeObfuscation() {
     return true
 }
 
-// Add coloring to rows (shorthand function)
-function addRowColor() {
-    // Have to do it seperate for each section
-    $('.section').each(function(i, elmn) {
-        $(elmn).find('.field-pair:visible').removeClass('even').filter(':even').addClass('even')
-    })
-}
+// Set default functions for the autocomplete everywhere
+jQuery.extend(jQuery.fn.typeahead.defaults, {
+    source: function (query, process) {
+        // If there's no separator, it must be a relative path
+        if(query.split(folderSeperator).length < 2 && this.$element.data('initialdir')) {
+            query  = this.$element.data('initialdir') + folderSeperator + query;
+        }
+        var params = { compact: "1", name: query }
+        if($('#show_hidden_folders').is(':checked')) {
+            params['show_hidden_folders'] = "1"
+        }
+        if(this.$element.data('files')) {
+            params['show_files'] = "1"
+        }
+        // Get info from the API
+        return jQuery.get(folderBrowseUrl, params, function (data) {
+            return process(data["paths"]);
+        });
+    },
+    updater: function(item) {
+        // Is it a relative path?
+        if(item.indexOf(this.$element.data('initialdir')) === 0) {
+            // Remove start
+            return item.replace(this.$element.data('initialdir') + folderSeperator, '');
+        }
+        // Full path
+        return item
+    }
+})
 
 $(document).ready(function () {
+    $('form').append('<input type="hidden" name="csrf_token" value="' + csrfToken + '">');
+
     /**
         Restart function
     **/
@@ -345,12 +422,13 @@ $(document).ready(function () {
         datatype: 'json',
         // But first remove Obfuscation!
         beforeSerialize: removeObfuscation,
-        beforeSubmit: function () {
-            $('.saveButton').each(function () {
+        beforeSubmit: function (arr, form, options) {
+            // Only in the current form
+            form.find('.saveButton').each(function () {
                 $(this).attr("disabled", "disabled").removeClass('btn-danger').html('<span class="glyphicon glyphicon-transfer"></span> ' + configTranslate.saving);
             });
         },
-        success: function (json) {
+        success: function (json, statusText, xhr, form) {
             if (json.error) {
                $('#config_err_msg').text(json.error);
                alert(json.error)
@@ -360,10 +438,20 @@ $(document).ready(function () {
                 if(confirm(configTranslate.needRestart + "\n" + configTranslate.buttonRestart + " SABnzbd?")) {
                     // No more questions
                     do_restart();
+                } else if(json.value.login_req) {
+                    go_to_login();
                 } else {
                     $('#config_err_msg').text(" ");
                     setTimeout(config_success, 1000);
                 }
+            } else if(json.value && json.value.login_req) {
+                go_to_login();
+            } else if(form && form.is('[data-reload-on-save]')) {
+                // Values changed that are rendered by the server, so reload the page
+                $('#config_err_msg').text(" ");
+                formWasSubmitted = true;
+                formHasChanged = false;
+                location.reload();
             } else {
                $('#config_err_msg').text(" ");
                setTimeout(config_success, 1000);
@@ -407,7 +495,7 @@ $(document).ready(function () {
     $('input[type="checkbox"]').parents('label').addClass('config-hover')
 
     // Disable sections
-    var checkDisabled = '#rating_enable, #enable_tv_sorting, #enable_movie_sorting, #enable_date_sorting'
+    var checkDisabled = '#enable_tv_sorting, #enable_movie_sorting, #enable_date_sorting'
 
     $(checkDisabled).on('change', function() {
         $(this).parent().nextAll().toggleClass('disabled')
@@ -421,14 +509,16 @@ $(document).ready(function () {
     $('.advanced-button').on('change', function(event){
         localStorage.setItem('advanced-settings', !$('.advanced-settings').is(':visible'))
         $('.advanced-settings').toggle()
-        addRowColor()
     })
-    if(localStorage.getItem('advanced-settings') == 'true') {
+    if(localStorage.getItem('advanced-settings') === 'true') {
         $('.advanced-settings').show()
         $('#advanced-settings-button').prop('checked', true)
-        addRowColor()
     }
-    addRowColor()
+
+    // Add tooltips
+    // Render tooltips in the body, otherwise they get clipped by sections with overflow: hidden
+    jQuery.fn.tooltip.Constructor.DEFAULTS.container = 'body'
+    jQuery('[title]').tooltip()
 });
 
 /*
@@ -448,16 +538,56 @@ var pagesContainer = new Array(arrPages.length);
 // Add trigger to focus on the field and load the results
 $(document).ready(function() {
     $('#search-menu').on('shown.bs.dropdown', function(event) {
+        setConfigSearchExpanded(true)
         // Focus so easy typing
         $('#search-box').focus()
         // Load things to search if we haven't yet
         if(!pagesContainer[0]) {
             $.each(arrPages, function(index, page) {
-                $.get(rootURL + 'config/' + page + '/', function(data) {
+                $.get(rootURL + 'config/' + page, function(data) {
                     pagesContainer[index] = $(data).find('label')
                 });
             });
         }
+    }).on('hidden.bs.dropdown', function(event) {
+        setConfigSearchExpanded(false)
+    });
+
+    $('#search-box').on('keydown', function(event) {
+        var key = event.key || event.which;
+        var isArrowDown = key === 'ArrowDown' || key === 40;
+        var isArrowUp = key === 'ArrowUp' || key === 38;
+        var isEscape = key === 'Escape' || key === 'Esc' || key === 27;
+
+        if(isArrowDown || isArrowUp) {
+            event.preventDefault();
+            event.stopPropagation();
+            focusConfigSearchResult(isArrowDown ? 1 : -1)
+        } else if(isEscape) {
+            event.preventDefault();
+            event.stopPropagation();
+            closeConfigSearch()
+        }
+    });
+
+    $('#search-dropdown').on('keydown', 'a.config-search-result', function(event) {
+        var key = event.key || event.which;
+        var isArrowDown = key === 'ArrowDown' || key === 40;
+        var isArrowUp = key === 'ArrowUp' || key === 38;
+        var isEscape = key === 'Escape' || key === 'Esc' || key === 27;
+
+        if(isArrowDown || isArrowUp) {
+            event.preventDefault();
+            event.stopPropagation();
+            focusConfigSearchResult(isArrowDown ? 1 : -1)
+        } else if(isEscape) {
+            event.preventDefault();
+            event.stopPropagation();
+            closeConfigSearch()
+        }
+    }).on('mouseenter focus', 'a.config-search-result', function() {
+        getConfigSearchResults().parent().removeClass('active')
+        $(this).parent().addClass('active')
     });
 
     // For the scrolling
@@ -483,11 +613,46 @@ $(document).ready(function() {
 
 // Don't go too fast
 var searchTimeout
+
+function getConfigSearchResults() {
+    return $('#search-dropdown').find('a.config-search-result')
+}
+
+function setConfigSearchExpanded(expanded) {
+    $('#search-menu > a[data-toggle="dropdown"]').attr('aria-expanded', expanded ? 'true' : 'false')
+}
+
+function closeConfigSearch() {
+    $('#search-menu').removeClass('open')
+    setConfigSearchExpanded(false)
+    $('#search-box').focus()
+}
+
+function focusConfigSearchResult(offset) {
+    var $results = getConfigSearchResults()
+    var activeIndex = $results.index(document.activeElement)
+    var nextIndex
+
+    if(!$results.length) return
+
+    if(activeIndex < 0) {
+        nextIndex = offset > 0 ? 0 : $results.length - 1
+    } else {
+        nextIndex = activeIndex + offset
+        if(nextIndex >= $results.length) nextIndex = 0
+        if(nextIndex < 0) nextIndex = $results.length - 1
+    }
+
+    getConfigSearchResults().parent().removeClass('active')
+    $results.eq(nextIndex).parent().addClass('active')
+    $results.eq(nextIndex).focus()
+}
+
 function doConfigSearch(value) {
     // Cancel previous
     clearTimeout(searchTimeout)
     // Build new search
-    var searchTerm = $(value).val().replace('"', '\"')
+    var searchTerm = $.trim($(value).val())
     var searchOutput = $('#search-dropdown')
 
     // Build new search
@@ -498,14 +663,24 @@ function doConfigSearch(value) {
         if (searchTerm.length < 2) return
         // Find some results!
         $.each(pagesContainer, function(page_index, results) {
+            if(!results) return
             // Get the matches
-            var subResults = results.filter(':contains("'+searchTerm+'")')
+            var subResults = results.filter(function() {
+                return $(this).text().toUpperCase().indexOf(searchTerm.toUpperCase()) >= 0
+            })
             if(subResults.length > 0) {
                 // Add the section
-                searchOutput.append('<li class="divider"></li>')
-                searchOutput.append('<li class="dropdown-header">'+configTranslate.searchPages[page_index]+'</li>')
+                searchOutput.append($('<li class="divider"></li>'))
+                searchOutput.append($('<li class="dropdown-header"></li>').text(configTranslate.searchPages[page_index]))
                 $.each(subResults, function(index, result) {
-                    searchOutput.append('<li><a href="'+rootURL + 'config/' + arrPages[page_index] +  '/#' + $(result).attr('for') +'">'+$(result).text()+'</a></li>')
+                    var resultUrl = rootURL + 'config/' + arrPages[page_index] +  '#' + $(result).attr('for')
+                    searchOutput.append(
+                        $('<li></li>').append(
+                            $('<a class="config-search-result"></a>')
+                                .attr('href', resultUrl)
+                                .text($(result).text())
+                        )
+                    )
                 })
             }
         })

@@ -1,16 +1,15 @@
 <!--#set global $pane="Special"#-->
-<!--#set global $help_uri="configuration/3.5/special"#-->
+<!--#set global $help_uri = $confighelpuri + "special"#-->
 <!--#include $webdir + "/_inc_header_uc.tmpl"#-->
 
 <div class="colmask">
-    <form action="saveSpecial" method="post" autocomplete="off">
-        <input type="hidden" id="apikey" name="apikey" value="$apikey" />
+    <form action="$url('config/special/save')" method="post" class="fullform" autocomplete="off">
         <div class="padTable">
             <h4 class="darkred nomargin">$T('explain-special')</h4>
         </div>
         <div class="section">
             <div class="col2">
-                <h3>$T('sptag-boolean') <a href="$helpuri$help_uri" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a></h3>
+                <h3>$T('sptag-boolean') <a href="$help_uri" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a></h3>
             </div><!-- /col2 -->
             <div class="col1">
                 <fieldset>
@@ -33,7 +32,7 @@
         </div><!-- /section -->
         <div class="section">
             <div class="col2">
-                <h3>$T('sptag-entries') <a href="$helpuri$help_uri" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a></h3>
+                <h3>$T('sptag-entries') <a href="$help_uri" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a></h3>
             </div><!-- /col2 -->
             <div class="col1">
                 <fieldset>

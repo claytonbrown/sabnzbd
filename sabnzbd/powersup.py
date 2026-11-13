@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -OO
-# Copyright 2007-2021 The SABnzbd-Team <team@sabnzbd.org>
+# Copyright 2007-2026 by The SABnzbd-Team (sabnzbd.org)
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -23,7 +23,6 @@ import os
 import subprocess
 import logging
 import time
-
 
 ##############################################################################
 # Power management for Windows
@@ -50,7 +49,7 @@ def win_hibernate():
     try:
         win_power_privileges()
         win32api.SetSystemPowerState(False, True)
-    except:
+    except Exception:
         logging.error(T("Failed to hibernate system"))
         logging.info("Traceback: ", exc_info=True)
 
@@ -60,7 +59,7 @@ def win_standby():
     try:
         win_power_privileges()
         win32api.SetSystemPowerState(True, True)
-    except:
+    except Exception:
         logging.error(T("Failed to standby system"))
         logging.info("Traceback: ", exc_info=True)
 
@@ -79,29 +78,29 @@ def win_shutdown():
 ##############################################################################
 
 
-def osx_shutdown():
+def macos_shutdown():
     """Shutdown macOS system, never returns"""
     try:
         subprocess.call(["osascript", "-e", 'tell app "System Events" to shut down'])
-    except:
+    except Exception:
         logging.error(T("Error while shutting down system"))
         logging.info("Traceback: ", exc_info=True)
     os._exit(0)
 
 
-def osx_standby():
+def macos_standby():
     """Make macOS system sleep, returns after wakeup"""
     try:
-        subprocess.call(["osascript", "-e", 'tell app "System Events" to sleep'])
+        subprocess.call(["pmset", "sleepnow"])
         time.sleep(10)
-    except:
+    except Exception:
         logging.error(T("Failed to standby system"))
         logging.info("Traceback: ", exc_info=True)
 
 
-def osx_hibernate():
+def macos_hibernate():
     """Make macOS system sleep, returns after wakeup"""
-    osx_standby()
+    macos_standby()
 
 
 ##############################################################################
@@ -184,7 +183,7 @@ def linux_shutdown():
             if proxy.CanShutdown():
                 proxy.Shutdown(dbus_interface=interface)
         else:
-            proxy, interface, pinterface = _get_systemproxy("Logind")
+            proxy, interface, _pinterface = _get_systemproxy("Logind")
             if proxy:
                 if proxy.CanPowerOff(dbus_interface=interface) == _LOGIND_SUCCESSFUL_RESULT:
                     proxy.PowerOff(_IS_NOT_INTERACTIVE, dbus_interface=interface)

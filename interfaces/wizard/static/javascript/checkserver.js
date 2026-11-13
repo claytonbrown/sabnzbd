@@ -1,9 +1,31 @@
+// Variable to track server test results
+var serverTestSuccessful = false;
+
+function resetTestResult() {
+    serverTestSuccessful = false;
+    $('#serverResponse').html(txtTestServer);
+    checkRequired();
+}
+
+function setTestResult(success) {
+    serverTestSuccessful = success;
+    checkRequired();
+}
+
 function checkRequired() {
-    if ($("#host").val() && $("#connections").val()) {
+    // Check if form is valid using HTML5 validation and if server test passed
+    if ($("form").get(0).checkValidity() && serverTestSuccessful) {
         $("#next-button").removeClass('disabled')
+        $("#next-button").removeAttr('data-toggle')
+        $("#next-button").removeAttr('title')
+        $("#next-button").tooltip('destroy')
         return true;
     } else {
         $("#next-button").addClass('disabled')
+        $("#next-button").attr('data-toggle', 'tooltip')
+        $("#next-button").attr('data-placement', 'left')
+        $("#next-button").attr('title', txtTestRequired)
+        $("#next-button").tooltip()
         return false;
     }
 }
@@ -12,66 +34,62 @@ $(document).ready(function() {
     // Add tooltips
     $('[data-toggle="tooltip"]').tooltip()
 
-    // On form-submit
+    // On server test button click
     $("#serverTest").click(function() {
+        // Check HTML5 form validation before testing server
+        if (!$("form").get(0).reportValidity()) {
+            return false;
+        }
+        
+        $('#serverTest').attr('aria-busy', 'true');
         $('#serverResponse').html(txtChecking);
-        $.getJSON(
-            "../api?mode=config&name=test_server&output=json",
-            $("form").serialize(),
-            function(result) {
+        $.ajax({
+            type: 'POST',
+            url: "../api?mode=config&name=test_server&output=json",
+            data: $("form").serialize(),
+            success: function(result) {
+                // Escape the server-supplied message before inserting it as HTML
+                var message = $('<div>').text(result.value.message).html();
                 if (result.value.result) {
-                    r = '<span class="success"><span class="glyphicon glyphicon-ok"></span> ' + result.value.message + '</span>';
+                    r = '<span class="success"><span class="glyphicon glyphicon-ok" aria-hidden="true"></span> ' + message + '</span>';
+                    setTestResult(true);
                 } else {
-                    r = '<span class="failed"><span class="glyphicon glyphicon-minus-sign"></span> ' + result.value.message + '</span>';
+                    r = '<span class="failed"><span class="glyphicon glyphicon-minus-sign" aria-hidden="true"></span> ' + message + '</span>';
+                    setTestResult(false);
                 }
                 r = r.replace('https://sabnzbd.org/certificate-errors', '<a href="https://sabnzbd.org/certificate-errors" class="failed" target="_blank">https://sabnzbd.org/certificate-errors</a>')
                 $('#serverResponse').html(r);
+                $('#serverTest').attr('aria-busy', 'false');
             }
-        );
+        });
         return false;
     });
 
-    $("#port, #connections").bind('keyup blur', function() {
-        if (this.value > 0) {
-            $(this).removeClass("incorrect");
-            $(this).addClass("correct");
-        } else {
-            $(this).removeClass("correct");
-            $(this).addClass("incorrect");
-        }
-        checkRequired()
-    });
-
-    $("#host, #username, #password").bind('keyup blur', function() {
-        if (this.value) {
-            $(this).removeClass("incorrect");
-            $(this).addClass("correct");
-        } else {
-            $(this).removeClass("correct");
-            $(this).addClass("incorrect");
-        }
-        checkRequired();
+    // Reset test result when any form field changes
+    $("#host, #username, #password, #port, #connections, #ssl_verify").bind('input change', function() {
+        resetTestResult();
     });
 
     $('#ssl').click(function() {
         if(this.checked) {
             // Enabled SSL change port when not already a custom port
-            if($('#port').val() == '119') {
+            if($('#port').val() === '119') {
                 $('#port').val('563')
             }
         } else {
             // Remove SSL port
-            if($('#port').val() == '563') {
+            if($('#port').val() === '563') {
                 $('#port').val('119')
             }
         }
+        resetTestResult();
     })
 
     checkRequired()
 
     $('form').submit(function(event) {
-        // Double check
-        if(!checkRequired()) {
+        // Check if server test passed (HTML5 validation is automatic)
+        if(!serverTestSuccessful) {
             event.preventDefault();
         }
     })

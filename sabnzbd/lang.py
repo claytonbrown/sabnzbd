@@ -1,6 +1,5 @@
 #!/usr/bin/python3 -OO
-# -*- coding: utf-8 -*-
-# Copyright 2011-2021 The SABnzbd-Team <team@sabnzbd.org>
+# Copyright 2007-2026 by The SABnzbd-Team (sabnzbd.org)
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -93,7 +92,11 @@ def list_languages():
 
 
 def is_rtl(lang):
-    return LanguageTable.get(lang, "en")[3]
+    """returns True if given lang is a right-to-left language. Default: False."""
+    try:
+        return LanguageTable.get(lang, "en")[3]
+    except Exception:
+        return False
 
 
 # English name, native name, code page, right-to-left
@@ -157,7 +160,7 @@ LanguageTable = {
     "om": ("Oromo", "Afaan Oromoo", 0, False),
     "pl": ("Polish", "Polski", 0, False),
     "pt": ("Portuguese", "Português", 0, False),
-    "pt_BR": ("Portuguese Brazillian", "Português Brasileiro", 0, False),
+    "pt_BR": ("Portuguese Brazilian", "Português Brasileiro", 0, False),
     "rm": ("Romansh", "Rumantsch grischun", 0, False),
     "rn": ("Kirundi", "kiRundi", 0, False),
     "ro": ("Romanian", "Româna", 1250, False),

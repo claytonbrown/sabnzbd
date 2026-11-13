@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -OO
-# Copyright 2007-2021 The SABnzbd-Team <team@sabnzbd.org>
+# Copyright 2007-2026 by The SABnzbd-Team (sabnzbd.org)
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -19,37 +19,37 @@
 sabnzbd.decoder - article decoder
 """
 
+import array
 import logging
 import hashlib
-import queue
-import binascii
-from io import BytesIO
-from threading import Thread
-from typing import Tuple, List, Optional
+import re
+from typing import Optional
 
 import sabnzbd
-import sabnzbd.cfg as cfg
-from sabnzbd.constants import SABYENC_VERSION_REQUIRED
-from sabnzbd.encoding import ubtou
-from sabnzbd.nzbstuff import Article
+from sabnzbd.constants import SABCTOOLS_VERSION_REQUIRED
+from sabnzbd.nzb import Article
 from sabnzbd.misc import match_str
 
-# Check for correct SABYenc version
-SABYENC_VERSION = None
+# Check for correct SABCTools version
+SABCTOOLS_VERSION = None
+SABCTOOLS_SIMD = None
+SABCTOOLS_OPENSSL_LINKED = None
 try:
-    import sabyenc3
+    import sabctools
 
-    SABYENC_ENABLED = True
-    SABYENC_VERSION = sabyenc3.__version__
-    # Verify version to at least match minor version
-    if SABYENC_VERSION[:3] != SABYENC_VERSION_REQUIRED[:3]:
+    SABCTOOLS_ENABLED = True
+    SABCTOOLS_VERSION = sabctools.__version__
+    SABCTOOLS_SIMD = sabctools.simd
+    SABCTOOLS_OPENSSL_LINKED = sabctools.openssl_linked
+    # Verify version to at least match minor version by splitting on "."
+    if SABCTOOLS_VERSION.split(".")[:2] != SABCTOOLS_VERSION_REQUIRED.split(".")[:2]:
         raise ImportError
-except ImportError:
-    SABYENC_ENABLED = False
+except Exception:
+    SABCTOOLS_ENABLED = False
 
 
 class BadData(Exception):
-    def __init__(self, data: bytes):
+    def __init__(self, data: bytearray):
         super().__init__()
         self.data = data
 
@@ -62,328 +62,224 @@ class BadUu(Exception):
     pass
 
 
-class Decoder:
-    """Implement thread-like coordinator for the decoders"""
+class SinkFailed(Exception):
+    """A streamed article could not be written, so nothing was kept.
 
-    def __init__(self):
-        logging.debug("Initializing decoders")
-        # Initialize queue and servers
-        self.decoder_queue = queue.Queue()
-
-        # Initialize decoders
-        self.decoder_workers = []
-        for i in range(cfg.num_decoders()):
-            self.decoder_workers.append(DecoderWorker(self.decoder_queue))
-
-    def start(self):
-        for decoder_worker in self.decoder_workers:
-            decoder_worker.start()
-
-    def is_alive(self) -> bool:
-        # Check all workers
-        for decoder_worker in self.decoder_workers:
-            if not decoder_worker.is_alive():
-                return False
-        return True
-
-    def stop(self):
-        # Put multiple to stop all decoders
-        for _ in self.decoder_workers:
-            self.decoder_queue.put((None, None))
-
-    def join(self):
-        # Wait for all decoders to finish
-        for decoder_worker in self.decoder_workers:
-            try:
-                decoder_worker.join()
-            except:
-                pass
-
-    def process(self, article: Article, raw_data: List[bytes]):
-        # We use reported article-size, just like sabyenc does
-        sabnzbd.ArticleCache.reserve_space(article.bytes)
-        self.decoder_queue.put((article, raw_data))
-
-    def queue_full(self) -> bool:
-        # Check if the queue size exceeds the limits
-        return self.decoder_queue.qsize() >= sabnzbd.ArticleCache.decoder_cache_article_limit
+    Deliberately not a BadYenc: that handler inspects the response lines and can decide
+    the article was fine after all, which would mark an article as successful when it
+    is not on disk anywhere.
+    """
 
 
-class DecoderWorker(Thread):
-    """The actuall workhorse that handles decoding!"""
+def decode(article: Article, decoder: sabctools.NNTPResponse):
+    """Decode an article response, or register its availability during precheck."""
+    decoded_data: Optional[bytearray] = None
+    nzo = article.nzf.nzo
+    art_id = article.article
 
-    def __init__(self, decoder_queue):
-        super().__init__()
-        logging.debug("Initializing decoder %s", self.name)
+    # Keeping track
+    article_success = False
 
-        self.decoder_queue: queue.Queue[Tuple[Optional[Article], Optional[List[bytes]]]] = decoder_queue
+    try:
+        if nzo.precheck:
+            raise BadYenc
 
-    def run(self):
-        while 1:
-            # Set Article and NzbObject objects to None so references from this
-            # thread do not keep the parent objects alive (see #1628)
-            decoded_data = raw_data = article = nzo = None
-            article, raw_data = self.decoder_queue.get()
-            if not article:
-                logging.info("Shutting down decoder %s", self.name)
-                break
+        if sabnzbd.LOG_ALL:
+            logging.debug("Decoding %s", art_id)
 
-            nzo = article.nzf.nzo
-            art_id = article.article
+        if decoder.format is sabctools.EncodingFormat.UU:
+            decoded_data = decode_uu(article, decoder)
+        else:
+            decoded_data = decode_yenc(article, decoder)
 
-            # Free space in the decoder-queue
-            sabnzbd.ArticleCache.free_reserved_space(article.bytes)
+        article_success = True
 
-            # Keeping track
-            article_success = False
+    except MemoryError:
+        logging.warning(T("Decoder failure: Out of memory"))
+        logging.info("Cache: %d, %d, %d", *sabnzbd.ArticleCache.cache_info())
+        logging.info("Traceback: ", exc_info=True)
+        sabnzbd.Downloader.pause()
 
-            try:
-                if nzo.precheck:
-                    raise BadYenc
+        # This article should be fetched again
+        article.allow_new_fetcher()
+        return
 
-                if sabnzbd.LOG_ALL:
-                    logging.debug("Decoding %s", art_id)
+    except BadData as error:
+        # Continue to the next one if we found new server
+        if search_new_server(article):
+            return
 
-                if article.nzf.type == "uu":
-                    decoded_data = decode_uu(article, raw_data)
-                else:
-                    decoded_data = decode_yenc(article, raw_data)
+        # Store data, maybe par2 can still fix it
+        decoded_data = error.data
 
-                article_success = True
+    except BadUu:
+        logging.info("Badly formed uu article in %s", art_id)
 
-            except MemoryError:
-                logging.warning(T("Decoder failure: Out of memory"))
-                logging.info("Decoder-Queue: %d", self.decoder_queue.qsize())
-                logging.info("Cache: %d, %d, %d", *sabnzbd.ArticleCache.cache_info())
-                logging.info("Traceback: ", exc_info=True)
-                sabnzbd.Downloader.pause()
+        # Try the next server
+        if search_new_server(article):
+            return
 
-                # This article should be fetched again
-                sabnzbd.NzbQueue.reset_try_lists(article)
-                continue
+    except SinkFailed:
+        # The file went away under the article, so it has to be fetched again. Any
+        # part of it already written is overwritten at the same offsets next time.
+        logging.info("Could not write %s to its file, fetching it again", art_id)
 
-            except BadData as error:
-                # Continue to the next one if we found new server
-                if search_new_server(article):
-                    continue
+        if search_new_server(article):
+            return
 
-                # Store data, maybe par2 can still fix it
-                decoded_data = error.data
+    except OSError as error:
+        # The same response the assembler gives a failed write. Fetching the article
+        # again cannot fix a full disk, and doing so would spend its retries and then
+        # fail the job as incomplete - so pause instead and leave the article to be
+        # picked up again once there is room.
+        if sabnzbd.filesystem.out_of_space(error):
+            logging.error(T("Disk full! Forcing Pause"))
+        else:
+            logging.error(T("Disk error on creating file %s"), error.filename)
+        logging.info("Traceback: ", exc_info=True)
+        sabnzbd.Downloader.pause()
+        article.allow_new_fetcher()
+        return
 
-            except BadUu:
-                logging.info("Badly formed uu article in %s", art_id)
+    except (BadYenc, ValueError):
+        # Handles precheck and badly formed articles
+        if nzo.precheck and decoder.status_code == 223:
+            # STAT was used, so we only get a status code
+            article_success = True
+        else:
+            # Examine the headers (for precheck) or body (for download).
+            if lines := decoder.lines:
+                for line in lines:
+                    lline = line.lower()
+                    if lline.startswith("message-id:"):
+                        article_success = True
+                        # Ignore words inside the ID, but still scan any adjacent removal notice.
+                        if nzo.precheck:
+                            lline = re.sub(r"^(message-id:[ \t]*)<[^<>\s]+>", r"\1", lline, count=1)
+                    # Look for DMCA clues (while skipping "X-" headers)
+                    if not lline.startswith("x-") and match_str(lline, ("dmca", "removed", "cancel", "blocked")):
+                        article_success = False
+                        logging.info("Article removed from server (%s)", art_id)
+                        break
 
-                # Try the next server
-                if search_new_server(article):
-                    continue
+        # Pre-check, proper article found so just register
+        if nzo.precheck and article_success and sabnzbd.LOG_ALL:
+            logging.debug("Server %s has article %s", article.fetcher, art_id)
+        elif not article_success:
+            # If not pre-check, this must be a bad article
+            if not nzo.precheck:
+                logging.info("Badly formed yEnc article %s", art_id)
 
-            except (BadYenc, ValueError):
-                # Handles precheck and badly formed articles
-                if nzo.precheck and raw_data and raw_data[0].startswith(b"223 "):
-                    # STAT was used, so we only get a status code
-                    article_success = True
-                else:
-                    # Try uu-decoding
-                    if (not nzo.precheck) and article.nzf.type != "yenc":
-                        try:
-                            decoded_data = decode_uu(article, raw_data)
-                            logging.debug("Found uu-encoded article %s in job %s", art_id, nzo.final_name)
-                            article_success = True
-                        except Exception:
-                            pass
-                    # Only bother with further checks if uu-decoding didn't work out
-                    if not article_success:
-                        # Convert the initial chunks of raw socket data to article lines,
-                        # and examine the headers (for precheck) or body (for download).
-                        for line in b"".join(raw_data[:2]).split(b"\r\n"):
-                            lline = line.lower()
-                            if lline.startswith(b"message-id:"):
-                                article_success = True
-                            # Look for DMCA clues (while skipping "X-" headers)
-                            if not lline.startswith(b"x-") and match_str(
-                                lline, (b"dmca", b"removed", b"cancel", b"blocked")
-                            ):
-                                article_success = False
-                                logging.info("Article removed from server (%s)", art_id)
-                                break
+            # Continue to the next one if we found new server
+            if search_new_server(article):
+                return
 
-                # Pre-check, proper article found so just register
-                if nzo.precheck and article_success and sabnzbd.LOG_ALL:
-                    logging.debug("Server %s has article %s", article.fetcher, art_id)
-                elif not article_success:
-                    # If not pre-check, this must be a bad article
-                    if not nzo.precheck:
-                        logging.info("Badly formed yEnc article in %s", art_id, exc_info=True)
+    except Exception:
+        logging.warning(T("Unknown Error while decoding %s"), art_id)
+        logging.info("Traceback: ", exc_info=True)
 
-                    # Continue to the next one if we found new server
-                    if search_new_server(article):
-                        continue
+        # Continue to the next one if we found new server
+        if search_new_server(article):
+            return
 
-            except:
-                logging.warning(T("Unknown Error while decoding %s"), art_id)
-                logging.info("Traceback: ", exc_info=True)
+    if decoded_data:
+        # If the data needs to be written to disk due to full cache, this will be slow
+        # Causing the decoder-queue to fill up and delay the downloader
+        sabnzbd.ArticleCache.save_article(article, decoded_data)
+        article.decoded = True
+    elif not nzo.precheck:
+        # Either there was nothing to save, or the decoder streamed it straight to the
+        # file. Both are on disk as far as the rest of the pipeline is concerned; the
+        # assembler advances past an on_disk article on its own when it next runs.
+        article.on_disk = True
 
-                # Continue to the next one if we found new server
-                if search_new_server(article):
-                    continue
-
-            if decoded_data:
-                # If the data needs to be written to disk due to full cache, this will be slow
-                # Causing the decoder-queue to fill up and delay the downloader
-                sabnzbd.ArticleCache.save_article(article, decoded_data)
-
-            sabnzbd.NzbQueue.register_article(article, article_success)
+    sabnzbd.NzbQueue.register_article(article, article_success)
 
 
-def decode_yenc(article: Article, raw_data: List[bytes]) -> bytes:
-    # Let SABYenc do all the heavy lifting
-    decoded_data, yenc_filename, crc, crc_expected, crc_correct = sabyenc3.decode_usenet_chunks(raw_data, article.bytes)
+def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[bytearray]:
+    """Record what the decoder produced.
 
-    # Mark as decoded
-    article.decoded = True
+    data is None when the article was streamed straight to its file rather than
+    decoded into memory. Everything the caller needs is still reported - sizes, offset,
+    CRC - so the only difference is that there is nothing left to cache or assemble.
+    """
+    # The job was deleted while the article was arriving, or the write failed. The
+    # decoder consumed the response anyway so the connection survives, but nothing was
+    # kept, so this is a failed article rather than one on disk.
+    if response.sink_failed:
+        # A closed file means the job went away while the article was arriving, and it
+        # only needs fetching again. Anything else is a real disk error - a full disk,
+        # most often - and is re-raised as the OSError it came from so it gets the same
+        # handling as a failed write from the assembler.
+        if isinstance(response.sink_error, OSError):
+            raise response.sink_error
+        raise SinkFailed
 
+    # Let SABCTools do all the heavy lifting
+    decoded_data = response.data
+    article.file_size = response.file_size
+    article.data_begin = response.part_begin
+    article.data_size = response.part_size
+    article.decoded_size = response.bytes_decoded
+    article.block_size = response.block_size
+    article.block_crcs = array.array("I", crcs) if (crcs := response.block_crcs) is not None else None
+
+    nzf = article.nzf
     # Assume it is yenc
-    article.nzf.type = "yenc"
+    nzf.type = "yenc"
 
-    # Only set the name if it was found and not obfuscated
-    if not article.nzf.filename_checked and yenc_filename:
+    # Only set the name if it was found and not obfuscated. Streamed articles never
+    # reach here: a sink is only handed out once the filename has been checked, exactly
+    # because this needs the bytes.
+    if decoded_data is not None and not nzf.filename_checked and (file_name := response.file_name):
         # Set the md5-of-16k if this is the first article
         if article.lowest_partnum:
-            article.nzf.md5of16k = hashlib.md5(decoded_data[:16384]).digest()
+            nzf.md5of16k = hashlib.md5(memoryview(decoded_data)[:16384]).digest()
 
         # Try the rename, even if it's not the first article
         # For example when the first article was missing
-        article.nzf.nzo.verify_nzf_filename(article.nzf, yenc_filename)
+        nzf.nzo.verify_nzf_filename(nzf, file_name)
 
     # CRC check
-    if not crc_correct:
+    if (crc := response.crc) is None:
         logging.info("CRC Error in %s", article.article)
+        # A streamed article is already on disk, so there is nothing to hand back; the
+        # bytes stay put either way, so par2 has the same chance of repairing it
         raise BadData(decoded_data)
+
+    article.crc32 = crc
 
     return decoded_data
 
 
-def decode_uu(article: Article, raw_data: List[bytes]) -> bytes:
-    """Try to uu-decode an article. The raw_data may or may not contain headers.
-    If there are headers, they will be separated from the body by at least one
-    empty line. In case of no headers, the first line seems to always be the nntp
-    response code (222) directly followed by the msg body."""
-    if not raw_data:
+def decode_uu(article: Article, response: sabctools.NNTPResponse) -> bytearray:
+    """Process a uu-decoded response"""
+    if not response.bytes_decoded:
         logging.debug("No data to decode")
         raise BadUu
 
-    # Line up the raw_data
-    with BytesIO() as encoded_data:
-        for data in raw_data:
-            encoded_data.write(data)
-        raw_data = encoded_data.getvalue().split(b"\r\n")
+    if response.baddata:
+        raise BadData(response.data)
 
-    # Index of the uu payload start in raw_data
-    uu_start = 0
+    decoded_data = response.data
+    article.decoded_size = response.bytes_decoded
+    article.block_size = article.block_crcs = None
+    nzf = article.nzf
+    nzf.type = "uu"
 
-    # Limit the number of lines to check for the onset of uu data
-    limit = min(len(raw_data), 32) - 1
-    if limit < 3:
-        logging.debug("Article too short to contain valid uu-encoded data")
-        raise BadUu
-
-    # Try to find an empty line separating the body from headers or response
-    # code and set the expected payload start to the next line.
-    try:
-        uu_start = raw_data[:limit].index(b"") + 1
-    except ValueError:
-        # No empty line, look for a response code instead
-        if raw_data[0].startswith(b"222 "):
-            uu_start = 1
-        else:
-            # Invalid data?
-            logging.debug("Failed to locate start of uu payload")
-            raise BadUu
-
-    def is_uu_junk(line: bytes) -> bool:
-        """Determine if the line is empty or contains known junk data"""
-        return (not line) or line == b"-- " or line.startswith(b"Posted via ")
-
-    # Check the uu 'begin' line
-    if article.lowest_partnum:
-        try:
-            # Make sure the line after the uu_start one isn't empty as well or
-            # detection of the 'begin' line won't work. For articles other than
-            # lowest_partnum, filtering out empty lines (and other junk) can
-            # wait until the actual decoding step.
-            for index in range(uu_start, limit):
-                if is_uu_junk(raw_data[index]):
-                    uu_start = index + 1
-                else:
-                    # Bingo
-                    break
-            else:
-                # Search reached the limit
-                raise IndexError
-
-            uu_begin_data = raw_data[uu_start].split(b" ")
-            # Filename may contain spaces
-            uu_filename = ubtou(b" ".join(uu_begin_data[2:]).strip())
-
-            # Sanity check the 'begin' line
-            if (
-                len(uu_begin_data) < 3
-                or uu_begin_data[0].lower() != b"begin"
-                or (not int(uu_begin_data[1], 8))
-                or (not uu_filename)
-            ):
-                raise ValueError
-
-            # Consider this enough proof to set the type, avoiding further
-            # futile attempts at decoding articles in this nzf as yenc.
-            article.nzf.type = "uu"
-
-            # Bump the pointer for the payload to the next line
-            uu_start += 1
-        except Exception:
-            logging.debug("Missing or invalid uu 'begin' line: %s", raw_data[uu_start] if uu_start < limit else None)
-            raise BadUu
-
-    # Do the actual decoding
-    with BytesIO() as decoded_data:
-        for line in raw_data[uu_start:]:
-            # Ignore junk
-            if is_uu_junk(line):
-                continue
-
-            # End of the article
-            if line in (b"`", b"end", b"."):
-                break
-
-            try:
-                decoded_line = binascii.a2b_uu(line)
-            except binascii.Error as msg:
-                try:
-                    # Workaround for broken uuencoders by Fredrik Lundh
-                    nbytes = (((ord(line[0]) - 32) & 63) * 4 + 5) / 3
-                    decoded_line = binascii.a2b_uu(line[:nbytes])
-                except Exception as msg2:
-                    logging.info(
-                        "Error while uu-decoding %s: %s (line: %s; workaround: %s)", article.article, msg, line, msg2
-                    )
-                    raise BadData(decoded_data.getvalue())
-
-            # Store the decoded data
-            decoded_data.write(decoded_line)
-
-        # Mark as decoded and set the type to uu; the latter is still needed in
-        # case the lowest_partnum article was damaged or slow to download.
-        article.decoded = True
-        article.nzf.type = "uu"
-
+    # Only set the name if it was found and not obfuscated
+    if not nzf.filename_checked and (file_name := response.file_name):
+        # Set the md5-of-16k if this is the first article
         if article.lowest_partnum:
-            decoded_data.seek(0)
-            article.nzf.md5of16k = hashlib.md5(decoded_data.read(16384)).digest()
-            # Handle the filename
-            if not article.nzf.filename_checked and uu_filename:
-                article.nzf.nzo.verify_nzf_filename(article.nzf, uu_filename)
+            nzf.md5of16k = hashlib.md5(memoryview(decoded_data)[:16384]).digest()
 
-        return decoded_data.getvalue()
+        # Try the rename, even if it's not the first article
+        # For example when the first article was missing
+        nzf.nzo.verify_nzf_filename(nzf, file_name)
+
+    article.crc32 = response.crc
+
+    return decoded_data
 
 
 def search_new_server(article: Article) -> bool:

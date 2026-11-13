@@ -1,54 +1,76 @@
 #!/usr/bin/python3
 
-""" Measure writing speed of disk specified (or working directory if not specified)"""
+"""Measure writing speed of disk specified (or working directory if not specified)"""
 
-import time
 import os
 import sys
+import logging
+import time
 
-_DUMP_DATA_SIZE = 10 * 1024 * 1024
-_DUMP_DATA = os.urandom(_DUMP_DATA_SIZE)
+BUFFERSIZE = 16 * 1024 * 1024
 
 
-def diskspeedmeasure(my_dirname: str) -> float:
+def diskspeedmeasure(dirname: str) -> float:
     """Returns writing speed to my_dirname in MB/s
     method: keep writing a file, until certain time is passed.
     Then divide bytes written by time passed
     In case of problems (ie non-writable dir or file), return 0.0
     """
-    maxtime = 0.5  # sec
+    maxtime = 1  # sec
     total_written = 0
-    filename = os.path.join(my_dirname, "outputTESTING.txt")
+    filename = os.path.join(dirname, "outputTESTING.txt")
+
+    # Prepare the whole buffer now for better write performance later
+    # This is done before timing starts to exclude buffer creation from measurement
+    buffer = os.urandom(BUFFERSIZE)
 
     try:
         # Use low-level I/O
-        try:
-            fp_testfile = os.open(filename, os.O_CREAT | os.O_WRONLY | os.O_BINARY, 0o777)
-        except AttributeError:
-            fp_testfile = os.open(filename, os.O_CREAT | os.O_WRONLY, 0o777)
+        fp_testfile = os.open(
+            filename,
+            os.O_CREAT | os.O_WRONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_SYNC", 0),
+            0o777,
+        )
+
+        overall_start = time.perf_counter()
+        maxtime = overall_start + 1
+        total_time = 0.0
 
         # Start looping
-        total_time = 0.0
-        while total_time < maxtime:
-            start = time.time()
-            os.write(fp_testfile, _DUMP_DATA)
+        for i in range(1, 5):
+            # Stop writing next buffer block, if time exceeds limit
+            if time.perf_counter() >= maxtime:
+                break
+            # Prepare the data chunk outside of timing
+            data_chunk = buffer * (i**2)
+
+            # Only measure the actual write and sync operations
+            write_start = time.perf_counter()
+            total_written += os.write(fp_testfile, data_chunk)
             os.fsync(fp_testfile)
-            total_time += time.time() - start
-            total_written += _DUMP_DATA_SIZE
+            total_time += time.perf_counter() - write_start
 
         # Have to use low-level close
         os.close(fp_testfile)
         # Remove the file
         os.remove(filename)
-    except (PermissionError, NotADirectoryError, FileNotFoundError):
+
+    except OSError:
         # Could not write, so ... report 0.0
+        logging.debug("Failed to measure disk speed on %s", dirname)
         return 0.0
 
-    return total_written / total_time / 1024 / 1024
+    megabyte_per_second = round(total_written / total_time / 1024 / 1024, 1)
+    logging.debug(
+        "Disk speed of %s = %.2f MB/s (in %.2f seconds)",
+        dirname,
+        megabyte_per_second,
+        time.perf_counter() - overall_start,
+    )
+    return megabyte_per_second
 
 
 if __name__ == "__main__":
-
     print("Let's go")
 
     if len(sys.argv) >= 2:
@@ -64,10 +86,10 @@ if __name__ == "__main__":
     try:
         SPEED = max(diskspeedmeasure(DIRNAME), diskspeedmeasure(DIRNAME))
         if SPEED:
-            print("Disk writing speed: %.2f Mbytes per second" % SPEED)
+            print("Disk writing speed: %.2f MBytes per second" % SPEED)
         else:
             print("No measurement possible. Check that directory is writable.")
-    except:
+    except Exception:
         print("Something went wrong. I don't know what")
         raise
 

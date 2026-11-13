@@ -1,0 +1,69 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:base",
+    ":disableDependencyDashboard"
+  ],
+  "schedule": [
+    "before 8am on Monday"
+  ],
+  "minimumReleaseAge": "14 days",
+  "baseBranches": ["develop"],
+  "pip_requirements": {
+    "fileMatch": [
+      "requirements.txt",
+      "tests/requirements.txt",
+      "builder/requirements.txt",
+      "builder/release-requirements.txt"
+    ]
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "fileMatch": ["^\\.github/workflows/build_release\\.yml$"],
+      "matchStrings": ["PYTHON_VERSION:\\s*\"(?<currentValue>.*?)\""],
+      "datasourceTemplate": "python-version",
+      "depNameTemplate": "python"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": ["^sabnzbd/constants\\.py$"],
+      "matchStrings": ["SABCTOOLS_VERSION_REQUIRED\\s*=\\s*\"(?<currentValue>.*?)\""],
+      "datasourceTemplate": "pypi",
+      "depNameTemplate": "sabctools"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": ["^\\.github/workflows/translations\\.yml$"],
+      "matchStrings": ["TX_VERSION=\"(?<currentValue>.*?)\""],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "transifex/cli"
+    }
+  ],
+  "ignorePaths": [],
+  "ignoreDeps": [
+    "jaraco.text",
+    "jaraco.context",
+    "jaraco.collections",
+    "tempora",
+    "cryptography"
+  ],
+  "packageRules": [
+    {
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["windows", "macos"],
+      "enabled": false
+    },
+    {
+      "matchPackagePatterns": [
+        "*"
+      ],
+      "groupName": "all dependencies",
+      "groupSlug": "all",
+      "separateMajorMinor": false,
+      "automerge": true
+    }
+  ],
+  "automergeStrategy": "squash",
+  "platformAutomerge": true
+}

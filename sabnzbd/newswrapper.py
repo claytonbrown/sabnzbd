@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -OO
-# Copyright 2007-2021 The SABnzbd-Team <team@sabnzbd.org>
+# Copyright 2007-2026 by The SABnzbd-Team (sabnzbd.org)
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -21,21 +21,35 @@ sabnzbd.newswrapper
 
 import errno
 import socket
+import threading
+from contextlib import suppress
+from selectors import EVENT_READ, EVENT_WRITE
 from threading import Thread
-from nntplib import NNTPPermanentError
 import time
 import logging
 import ssl
-from typing import List, Optional, Tuple, AnyStr
+from typing import Optional, Callable
 
+import sabctools
 import sabnzbd
 import sabnzbd.cfg
-from sabnzbd.constants import DEF_TIMEOUT
+from sabnzbd.constants import DEF_NETWORKING_TIMEOUT, NNTP_BUFFER_SIZE, Status, FORCE_PRIORITY
 from sabnzbd.encoding import utob
-from sabnzbd.misc import nntp_to_msg, is_ipv4_addr, is_ipv6_addr, get_server_addrinfo
+from sabnzbd.get_addrinfo import AddrInfo
+from sabnzbd.decorators import synchronized, DOWNLOADER_LOCK
 
 # Set pre-defined socket timeout
-socket.setdefaulttimeout(DEF_TIMEOUT)
+socket.setdefaulttimeout(DEF_NETWORKING_TIMEOUT)
+
+
+class NNTPPermanentError(Exception):
+    def __init__(self, msg: str, code: int):
+        super().__init__()
+        self.msg = msg
+        self.code = code
+
+    def __str__(self) -> str:
+        return self.msg
 
 
 class NewsWrapper:
@@ -45,81 +59,95 @@ class NewsWrapper:
         "thrdnum",
         "blocking",
         "timeout",
-        "article",
-        "data",
+        "decoder",
         "nntp",
         "connected",
+        "ready",
         "user_sent",
         "pass_sent",
         "group",
         "user_ok",
         "pass_ok",
         "force_login",
-        "status_code",
+        "next_request",
+        "selector_events",
+        "lock",
+        "generation",
+        "tls_wants_write",
     )
 
-    def __init__(self, server, thrdnum, block=False):
+    def __init__(self, server: "sabnzbd.downloader.Server", thrdnum: int, block: bool = False, generation: int = 0):
         self.server: sabnzbd.downloader.Server = server
         self.thrdnum: int = thrdnum
         self.blocking: bool = block
+        self.generation: int = generation
+        if getattr(self, "lock", None) is None:
+            self.lock: threading.Lock = threading.Lock()
 
         self.timeout: Optional[float] = None
-        self.article: Optional[sabnzbd.nzbstuff.Article] = None
-        self.data: List[AnyStr] = []
+
+        self.decoder: Optional[sabctools.Decoder] = None
 
         self.nntp: Optional[NNTP] = None
 
-        self.connected: bool = False
+        self.connected: bool = False  # TCP/TLS handshake complete
+        self.ready: bool = False  # Auth complete, can serve requests
         self.user_sent: bool = False
         self.pass_sent: bool = False
         self.user_ok: bool = False
         self.pass_ok: bool = False
         self.force_login: bool = False
         self.group: Optional[str] = None
-        self.status_code: Optional[int] = None
+
+        # Command queue and concurrency
+        self.next_request: Optional[tuple[bytes, Optional[sabnzbd.nzb.Article]]] = None
+        self.selector_events = 0
+        self.tls_wants_write: bool = False
+
+    @property
+    def article(self) -> Optional["sabnzbd.nzb.Article"]:
+        """The article currently being downloaded"""
+        with self.lock:
+            if self.decoder is not None and (pending := self.decoder.pending):
+                return pending[0]
+            return None
 
     def init_connect(self):
         """Setup the connection in NNTP object"""
-        # Server-info is normally requested by initialization of
-        # servers in Downloader, but not when testing servers
-        if self.blocking and not self.server.info:
-            self.server.info = get_server_addrinfo(self.server.host, self.server.port)
+        # Sanity check, especially for the server test
+        if not self.server.addrinfo:
+            raise socket.error(errno.EADDRNOTAVAIL, T("Invalid server address."))
 
-        # Construct NNTP object
-        self.nntp = NNTP(self, self.server.hostip)
+        # Construct buffer and NNTP object
+        self.decoder = sabctools.Decoder(NNTP_BUFFER_SIZE)
+        self.nntp = NNTP(self, self.server.addrinfo)
         self.timeout = time.time() + self.server.timeout
 
-    def finish_connect(self, code: int):
+        # On connect the first "response" will be 200 Welcome
+        self.decoder.expect(None)
+
+    def finish_connect(self, code: int, message: str) -> None:
         """Perform login options"""
         if not (self.server.username or self.server.password or self.force_login):
-            self.connected = True
+            self.ready = True
             self.user_sent = True
             self.user_ok = True
             self.pass_sent = True
             self.pass_ok = True
 
-        if code == 501 and self.user_sent:
-            # Change to a sensible text
-            code = 481
-            self.data[0] = "%d %s" % (code, T("Authentication failed, check username/password."))
-            self.status_code = code
-            self.user_ok = True
-            self.pass_sent = True
-
         if code == 480:
             self.force_login = True
-            self.connected = False
+            self.ready = False
             self.user_sent = False
             self.user_ok = False
             self.pass_sent = False
             self.pass_ok = False
 
-        if code in (400, 502):
-            raise NNTPPermanentError(nntp_to_msg(self.data))
+        if code in (400, 500, 502):
+            raise NNTPPermanentError(message, code)
         elif not self.user_sent:
             command = utob("authinfo user %s\r\n" % self.server.username)
-            self.nntp.sock.sendall(command)
-            self.clear_data()
+            self.queue_command(command)
             self.user_sent = True
         elif not self.user_ok:
             if code == 381:
@@ -129,115 +157,383 @@ class NewsWrapper:
                 self.user_ok = True
                 self.pass_sent = True
                 self.pass_ok = True
-                self.connected = True
+                self.ready = True
 
         if self.user_ok and not self.pass_sent:
             command = utob("authinfo pass %s\r\n" % self.server.password)
-            self.nntp.sock.sendall(command)
-            self.clear_data()
+            self.queue_command(command)
             self.pass_sent = True
         elif self.user_ok and not self.pass_ok:
             if code != 281:
                 # Assume that login failed (code 481 or other)
-                raise NNTPPermanentError(nntp_to_msg(self.data))
+                raise NNTPPermanentError(message, code)
             else:
-                self.connected = True
+                self.ready = True
 
         self.timeout = time.time() + self.server.timeout
 
-    def body(self):
-        """Request the body of the article"""
+    def article_sink(self, article: Optional["sabnzbd.nzb.Article"]) -> Optional[sabctools.FileWriter]:
+        """Where this article's data should be written, or None to decode into memory.
+
+        Decided before the request goes out, which is possible because the file an
+        article belongs to is known then; only the offset within it is not, and the
+        decoder reads that from the yEnc headers itself.
+
+        Streaming is refused whenever the bytes are still needed in memory. The first
+        article of a file is the clearest case: until the filename has been checked,
+        decode_yenc uses the data to derive md5of16k and to rename the file, and the
+        file has no path to write to yet. Those articles take the cache path exactly as
+        before, so the in-memory route stays live in every configuration.
+
+        It is also refused while the download directory is not keeping up with writes
+        placed where they belong.
+        """
+        if not article or not sabnzbd.cfg.direct_decode() or not sabnzbd.cfg.direct_write():
+            return None
+
+        if not sabnzbd.WriteMonitor.allow_direct_decode:
+            return None
+
+        nzf = article.nzf
+        # type is only known once the first article of the file has decoded, and uu
+        # carries no offsets to write at
+        if nzf.type != "yenc":
+            return None
+        # The first article is the one decode_yenc derives md5of16k from, so its bytes
+        # have to be in memory. Every other article only feeds verify_nzf_filename,
+        # which gives up as soon as there is a filepath - and there is one below.
+        if article.lowest_partnum:
+            return None
+        if not nzf.prepare_filepath():
+            return None
+
+        try:
+            return sabnzbd.Assembler.get_writer(nzf, stream=True)
+        except OSError:
+            # Cannot open the file: fall back to memory rather than failing the article
+            logging.debug("Could not open %s for streaming", nzf.filepath, exc_info=True)
+            return None
+
+    def queue_command(
+        self,
+        command: bytes,
+        article: Optional["sabnzbd.nzb.Article"] = None,
+    ) -> None:
+        """Add a command to the command queue"""
+        if self.next_request:
+            # This should never happen, but guard in case it does
+            _, article = self.next_request
+            self.discard(article, count_article_try=False)
+        self.next_request = command, article
+
+    def queue_article(self, article: "sabnzbd.nzb.Article"):
+        """Add an article request to the command queue"""
         self.timeout = time.time() + self.server.timeout
-        if self.article.nzf.nzo.precheck:
+        if article.nzf.nzo.precheck:
             if self.server.have_stat:
-                command = utob("STAT <%s>\r\n" % self.article.article)
+                command = utob("STAT <%s>\r\n" % article.article)
             else:
-                command = utob("HEAD <%s>\r\n" % self.article.article)
+                command = utob("HEAD <%s>\r\n" % article.article)
         elif self.server.have_body:
-            command = utob("BODY <%s>\r\n" % self.article.article)
+            command = utob("BODY <%s>\r\n" % article.article)
         else:
-            command = utob("ARTICLE <%s>\r\n" % self.article.article)
-        self.nntp.sock.sendall(command)
-        self.clear_data()
+            command = utob("ARTICLE <%s>\r\n" % article.article)
+        self.queue_command(command, article)
 
-    def send_group(self, group: str):
-        """Send the NNTP GROUP command"""
-        self.timeout = time.time() + self.server.timeout
-        command = utob("GROUP %s\r\n" % group)
-        self.nntp.sock.sendall(command)
-        self.clear_data()
+    def on_response(self, response: sabctools.NNTPResponse, article: Optional["sabnzbd.nzb.Article"]) -> None:
+        """A response to a NNTP request is received"""
+        server = self.server
+        article_done = response.status_code in (220, 222) and article
 
-    def recv_chunk(self, block: bool = False) -> Tuple[int, bool, bool]:
-        """Receive data, return #bytes, done, skip"""
-        self.timeout = time.time() + self.server.timeout
-        while 1:
-            try:
-                if self.nntp.nw.server.ssl:
-                    # SSL chunks come in 16K frames
-                    # Setting higher limits results in slowdown
-                    chunk = self.nntp.sock.recv(16384)
+        if article_done:
+            with DOWNLOADER_LOCK:
+                # Update statistics only when we fetched a whole article
+                # The side effect is that we don't count things like article-not-available messages
+                article.nzf.nzo.update_download_stats(sabnzbd.BPSMeter.bps, server.id, response.bytes_read)
+
+        # Response code depends on request command:
+        # 220 = ARTICLE, 222 = BODY
+        if not article_done:
+            if not self.ready or not article or response.status_code in (281, 381, 480, 481, 482):
+                self.discard(article, count_article_try=False)
+                if not sabnzbd.Downloader.finish_connect_nw(self, response):
+                    return
+                if self.ready:
+                    logging.info("Connecting %s@%s finished", self.thrdnum, server.host)
+
+            elif response.status_code == 223 or (response.status_code == 221 and article.nzf.nzo.precheck):
+                # STAT replies with 223; its HEAD fallback returns headers with 221.
+                article_done = True
+                logging.debug("Article <%s> is present on %s", article.article, server.host)
+
+            elif response.status_code in (411, 423, 430, 451):
+                article_done = True
+                logging.debug(
+                    "Thread %s@%s: Article %s missing (error=%s)",
+                    self.thrdnum,
+                    server.host,
+                    article.article,
+                    response.status_code,
+                )
+
+            elif response.status_code == 500:
+                if article.nzf.nzo.precheck:
+                    # Assume "STAT" command is not supported
+                    server.have_stat = False
+                    logging.debug("Server %s does not support STAT", server.host)
                 else:
-                    # Get as many bytes as possible
-                    chunk = self.nntp.sock.recv(262144)
-                break
-            except ssl.SSLWantReadError:
-                # SSL connections will block until they are ready.
-                # Either ignore the connection until it responds
-                # Or wait in a loop until it responds
-                if block:
-                    # time.sleep(0.0001)
-                    continue
+                    # Assume "BODY" command is not supported
+                    server.have_body = False
+                    logging.debug("Server %s does not support BODY", server.host)
+                self.discard(article, count_article_try=False)
+
+            else:
+                # Don't warn for (internal) server errors during downloading
+                if response.status_code not in (400, 502, 503):
+                    logging.warning(
+                        T("%s@%s: Received unknown status code %s for article %s"),
+                        self.thrdnum,
+                        server.host,
+                        response.status_code,
+                        article.article,
+                    )
+
+                # Ditch this thread, we don't know what data we got now so the buffer can be bad
+                sabnzbd.Downloader.reset_nw(
+                    self,
+                    f"Server error or unknown status code: {response.message}",
+                    wait=False,
+                    count_article_try=False,
+                    article=article,
+                    bad_connection=True,
+                )
+                return
+
+        if article_done:
+            # Successful data, clear "bad" counter
+            server.bad_cons = 0
+            server.errormsg = server.warning = ""
+
+            # Decode
+            sabnzbd.Downloader.decode(article, response)
+
+            if sabnzbd.LOG_ALL:
+                logging.debug("Thread %s@%s: %s done", self.thrdnum, server.host, article.article)
+
+    def read(
+        self,
+        nbytes: int = 0,
+        on_response: Optional[Callable[[int, str], None]] = None,
+        generation: Optional[int] = None,
+    ) -> tuple[int, Optional[int]]:
+        """Receive data, return #bytes, #pendingbytes
+        :param nbytes: maximum number of bytes to read
+        :param on_response: callback for each complete response received
+        :param generation: expected reset generation
+        :return: #bytes, #pendingbytes
+        """
+        if generation is None:
+            generation = self.generation
+
+        # NewsWrapper is being reset
+        if self.decoder is None:
+            return 0, None
+
+        # Receive data into the decoder pre-allocated buffer
+        if not nbytes and self.nntp.nw.server.ssl and not self.nntp.nw.blocking and sabctools.openssl_linked:
+            # Use patched version when downloading
+            bytes_recv = sabctools.unlocked_ssl_recv_into(self.nntp.sock, self.decoder)
+        else:
+            bytes_recv = self.nntp.sock.recv_into(self.decoder, nbytes=nbytes)
+
+        # No data received
+        if bytes_recv == 0:
+            raise ConnectionError("Server closed connection")
+
+        # Data without a request, such as an idle timeout notice
+        if not self.decoder.expected:
+            raise ConnectionError("Unsolicited data from server")
+
+        # Success, move timeout
+        self.timeout = time.time() + self.server.timeout
+
+        self.decoder.process(bytes_recv)
+        if self.decoder:
+            for response in self.decoder:
+                with self.lock:
+                    # Check generation under lock to avoid racing with hard_reset
+                    if self.generation != generation:
+                        return bytes_recv, None
+                article = response.context
+                if on_response:
+                    on_response(response.status_code, response.message)
+                self.on_response(response, article)
+
+            # on_response may have reset the connection
+            if self.generation != generation:
+                return bytes_recv, None
+
+            # After each response this socket may need to be made available to write the next request,
+            # or removed from socket monitoring to prevent hot looping.
+            if self.prepare_request():
+                # There is either a next_request, partial send, or an inflight request.
+                self.modify_for_write()
+            else:
+                # Only remove the socket if it's not SSL or has no pending data, otherwise the recursive call may
+                # call prepare_request again and find a request, but the socket would have already been removed.
+                if not self.server.ssl or not self.nntp or not self.nntp.sock.pending():
+                    # No further work for this socket
+                    sabnzbd.Downloader.remove_socket(self)
+        elif self.nntp and self.nntp.write_buffer:
+            # No complete responses, but may be able to send partial writes.
+            self.modify_for_write()
+
+        # The SSL-layer might still contain data even though the socket does not. Another Downloader-loop would
+        # not identify this socket anymore as it is not returned by select(). So, we have to forcefully trigger
+        # another recv_chunk so the buffer is increased and the data from the SSL-layer is read. See #2752.
+        if self.server.ssl and self.nntp and (pending := self.nntp.sock.pending()):
+            return bytes_recv, pending
+        return bytes_recv, None
+
+    def modify_for_write(self):
+        """
+        Monitor for read/write events if there is a queued or partially sent request.
+
+        If there is a next_request or partial write to send, ensure the socket is registered for write events.
+        Sockets may be modified to monitor only read events when the concurrency limit is reached or an
+        SSLWantReadError occurs.
+        Checks before calling modify_socket to prevent locks on the hot path
+        """
+        if (
+            self.next_request or (self.nntp and self.nntp.write_buffer)
+        ) and self.selector_events != EVENT_READ | EVENT_WRITE:
+            sabnzbd.Downloader.modify_socket(self, EVENT_READ | EVENT_WRITE)
+
+    def prepare_request(self) -> bool:
+        """Queue an article request if appropriate."""
+        server = self.server
+
+        # Do not pipeline requests until authentication is completed (connected)
+        if not self.blocking and (self.ready or not (self.decoder is not None and self.decoder.expected)):
+            server_ready = (
+                server.active
+                and not server.restart
+                and not (
+                    sabnzbd.Downloader.no_active_jobs()
+                    or sabnzbd.Downloader.shutdown
+                    or sabnzbd.Downloader.paused_for_postproc
+                    or sabnzbd.Downloader.force_disconnect
+                )
+            )
+
+            if server_ready:
+                # Queue the next article if none exists
+                if not self.next_request and (article := server.get_article()):
+                    self.queue_article(article)
+                    return True
+            else:
+                # Server not ready, discard next_request if it is for an article
+                if self.next_request:
+                    _, article = self.next_request
+                    if article:
+                        self.discard(article, count_article_try=False, retry_article=True)
+                        self.next_request = None
+
+        # Return True if there is work queued or in flight
+        return bool(self.next_request or (self.decoder is not None and self.decoder.expected))
+
+    def write(self):
+        """Send data to server"""
+        server = self.server
+
+        try:
+            # Flush any buffered data
+            if self.nntp.write_buffer:
+                sent = self.nntp.sock.send(self.nntp.write_buffer)
+                self.nntp.write_buffer = self.nntp.write_buffer[sent:]
+                # If buffer still has data, wait for next write opportunity
+                if self.nntp.write_buffer:
+                    return
+
+            # If available, try to send new command
+            if self.prepare_request():
+                # Nothing to send but already requests in-flight
+                if not self.next_request:
+                    sabnzbd.Downloader.modify_socket(self, EVENT_READ)
+                    return
+
+                if self.decoder.expected < server.pipelining_requests:
+                    command, article = self.next_request
+                    if article:
+                        nzo = article.nzf.nzo
+                        if nzo.removed_from_queue or (
+                            nzo.status is Status.PAUSED and nzo.priority is not FORCE_PRIORITY
+                        ):
+                            self.discard(article, count_article_try=False, retry_article=True)
+                            self.next_request = None
+                            return
+
+                    if sabnzbd.LOG_ALL:
+                        logging.debug("Thread %s@%s: %s", self.thrdnum, server.host, command)
+
+                    # Non-blocking send - buffer any unsent data
+                    sent = self.nntp.sock.send(command)
+                    if sent < len(command):
+                        logging.debug("%s@%s: Partial send", self.thrdnum, server.host)
+                        self.nntp.write_buffer = command[sent:]
+
+                    # The par2 block size to split the article's CRC at, 0 while no par2 set describes its file
+                    block_size = 0
+                    if article:
+                        block_size = article.nzf.nzo.par2_block_size(article.nzf.filename)
+                    self.decoder.expect(article, self.article_sink(article), block_size=block_size)
+                    self.next_request = None
                 else:
-                    return 0, False, True
+                    # Concurrency limit reached; wait until a response is read to prevent hot looping on EVENT_WRITE
+                    sabnzbd.Downloader.modify_socket(self, EVENT_READ)
+            else:
+                # No further work for this socket
+                sabnzbd.Downloader.remove_socket(self)
+        except ssl.SSLWantWriteError:
+            # Socket not ready for writing, keep buffer and wait for next write event
+            pass
+        except ssl.SSLWantReadError:
+            # SSL renegotiation needs read first
+            sabnzbd.Downloader.modify_socket(self, EVENT_READ)
+        except BlockingIOError:
+            # Socket not ready for writing, keep buffer and wait for next write event
+            pass
+        except socket.error as err:
+            logging.info("Looks like server closed connection: %s, type: %s", err, type(err))
+            sabnzbd.Downloader.reset_nw(self, "Server broke off connection", warn=True, wait=False)
+        except Exception:
+            logging.error(T("Suspect error in downloader"))
+            logging.info("Traceback: ", exc_info=True)
+            sabnzbd.Downloader.reset_nw(self, "Server broke off connection", warn=True)
 
-        if not self.data:
-            try:
-                self.status_code = int(chunk[:3])
-            except:
-                self.status_code = None
-
-        # Append so we can do 1 join(), much faster than multiple!
-        self.data.append(chunk)
-
-        # Official end-of-article is ".\r\n" but sometimes it can get lost between 2 chunks
-        chunk_len = len(chunk)
-        if chunk[-5:] == b"\r\n.\r\n":
-            return chunk_len, True, False
-        elif chunk_len < 5 and len(self.data) > 1:
-            # We need to make sure the end is not split over 2 chunks
-            # This is faster than join()
-            combine_chunk = self.data[-2][-5:] + chunk
-            if combine_chunk[-5:] == b"\r\n.\r\n":
-                return chunk_len, True, False
-
-        # Still in middle of data, so continue!
-        return chunk_len, False, False
-
-    def soft_reset(self):
-        """Reset for the next article"""
-        self.timeout = None
-        self.article = None
-        self.clear_data()
-
-    def clear_data(self):
-        """Clear the stored raw data"""
-        self.data = []
-        self.status_code = None
-
-    def hard_reset(self, wait: bool = True, send_quit: bool = True):
+    @synchronized(DOWNLOADER_LOCK)
+    def hard_reset(self, wait: bool = True):
         """Destroy and restart"""
-        if self.nntp:
-            try:
-                if send_quit:
-                    self.nntp.sock.sendall(b"QUIT\r\n")
-                    time.sleep(0.01)
-                self.nntp.sock.close()
-            except:
-                pass
-            self.nntp = None
+        with self.lock:
+            # Drain unsent requests
+            if self.next_request:
+                _, article = self.next_request
+                self.discard(article, count_article_try=False, retry_article=True)
+                self.next_request = None
+            # Drain responses. The decoder is replaced by __init__ below, so its own
+            # queue goes with it; only the articles need handing back.
+            if self.decoder is not None:
+                for article in self.decoder.pending:
+                    if article:
+                        self.discard(article, count_article_try=False, retry_article=True)
 
-        # Reset all variables (including the NNTP connection)
-        self.__init__(self.server, self.thrdnum)
+            if self.nntp:
+                sabnzbd.Downloader.remove_socket(self)
+                self.nntp.close(send_quit=self.ready)
+                self.nntp = None
+
+            # Reset all variables (including the NNTP connection) and increment the generation counter
+            self.__init__(self.server, self.thrdnum, generation=self.generation + 1)
 
         # Wait before re-using this newswrapper
         if wait:
@@ -247,67 +543,104 @@ class NewsWrapper:
             # Reset for internal reasons, just wait 5 sec
             self.timeout = time.time() + 5
 
+    def discard(
+        self,
+        article: Optional["sabnzbd.nzb.Article"],
+        count_article_try: bool = True,
+        retry_article: bool = True,
+    ) -> None:
+        """Discard an article back to the queue"""
+        if article:
+            # The job might return to the queue in the future so clear the current server
+            if article.nzf.nzo.removed_from_queue:
+                article.allow_new_fetcher()
+                return
+
+            # Only some errors should count towards the total tries for each server
+            if count_article_try:
+                article.tries += 1
+
+            # Do we discard, or try again for this server
+            if not retry_article or (not self.server.required and article.tries > sabnzbd.cfg.max_art_tries()):
+                # Too many tries on this server, consider article missing
+                sabnzbd.Downloader.decode(article)
+                article.tries = 0
+            else:
+                # Allow all servers again for this article
+                # Do not use the article_queue, as the server could already have been disabled when we get here!
+                article.allow_new_fetcher()
+
     def __repr__(self):
         return "<NewsWrapper: server=%s:%s, thread=%s, connected=%s>" % (
             self.server.host,
             self.server.port,
             self.thrdnum,
-            self.connected,
+            self.ready,
         )
 
 
 class NNTP:
     # Pre-define attributes to save memory
-    __slots__ = ("nw", "host", "error_msg", "sock", "fileno")
+    __slots__ = ("nw", "addrinfo", "error_msg", "sock", "fileno", "closed", "write_buffer")
 
-    def __init__(self, nw: NewsWrapper, host):
+    def __init__(self, nw: NewsWrapper, addrinfo: AddrInfo):
         self.nw: NewsWrapper = nw
-        self.host: str = host  # Store the fastest ip
+        # Add local reference to prevent crash in case the server.addrinfo is reset
+        self.addrinfo: AddrInfo = addrinfo
         self.error_msg: Optional[str] = None
 
-        if not self.nw.server.info:
-            raise socket.error(errno.EADDRNOTAVAIL, "Address not available - Check for internet or DNS problems")
+        # Prevent closing this socket until it's done connecting
+        self.closed = False
 
-        af, socktype, proto, canonname, sa = self.nw.server.info[0]
+        # Buffer for non-blocking writes
+        self.write_buffer: bytes = b""
 
-        # there will be a connect to host (or self.host, so let's force set 'af' to the correct value
-        if is_ipv4_addr(self.host):
-            af = socket.AF_INET
-        if is_ipv6_addr(self.host):
-            af = socket.AF_INET6
+        # Create SSL-context if it is needed and not created yet
+        if self.nw.server.ssl and not self.nw.server.ssl_context:
+            # Setup the SSL socket
+            # Set Certificate validation: 0=Disabled, 1=Minimal, 2=Medium, 3=Strict
+            self.nw.server.ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
 
-        # Secured or unsecured?
-        if not self.nw.server.ssl:
-            # Basic connection
-            self.sock = socket.socket(af, socktype, proto)
-        else:
-            # Use context or just wrapper
-            if sabnzbd.CERTIFICATE_VALIDATION:
-                # Setup the SSL socket
-                ctx = ssl.create_default_context()
-
-                if not sabnzbd.cfg.allow_old_ssl_tls():
-                    # We want a modern TLS (1.2 or higher), so we disallow older protocol versions (<= TLS 1.1)
-                    ctx.options |= ssl.OP_NO_SSLv2 | ssl.OP_NO_SSLv3 | ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1
-
-                # Only verify hostname when we're strict
-                if self.nw.server.ssl_verify < 2:
-                    ctx.check_hostname = False
-                # Certificates optional
-                if self.nw.server.ssl_verify == 0:
-                    ctx.verify_mode = ssl.CERT_NONE
-
-                # Did the user set a custom cipher-string?
-                if self.nw.server.ssl_ciphers:
-                    # At their own risk, socket will error out in case it was invalid
-                    ctx.set_ciphers(self.nw.server.ssl_ciphers)
-
-                self.sock = ctx.wrap_socket(socket.socket(af, socktype, proto), server_hostname=self.nw.server.host)
+            # Allow those pesky virus-scanners to inject their scanning certificates
+            if self.nw.server.ssl_verify <= 2:
+                self.nw.server.ssl_context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+                # This flag is only available for Python 3.10 and above
+                if hasattr(ssl, "VERIFY_X509_PARTIAL_CHAIN"):
+                    self.nw.server.ssl_context.verify_flags &= ~ssl.VERIFY_X509_PARTIAL_CHAIN
             else:
-                # Use a regular wrapper, no certificate validation
-                self.sock = ssl.wrap_socket(socket.socket(af, socktype, proto))
+                # Make sure it's enabled for Strict mode, also pre-3.13
+                self.nw.server.ssl_context.verify_flags |= ssl.VERIFY_X509_STRICT
+                # This flag is only available for Python 3.10 and above
+                if hasattr(ssl, "VERIFY_X509_PARTIAL_CHAIN"):
+                    self.nw.server.ssl_context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
 
-        # Store fileno of the socket
+            # Only verify hostname when Medium or Strict
+            if self.nw.server.ssl_verify <= 1:
+                self.nw.server.ssl_context.check_hostname = False
+
+            # Certificates optional
+            if self.nw.server.ssl_verify <= 0:
+                self.nw.server.ssl_context.verify_mode = ssl.CERT_NONE
+
+            # Did the user set a custom cipher-string?
+            if self.nw.server.ssl_ciphers:
+                # At their own risk, socket will error out in case it was invalid
+                self.nw.server.ssl_context.set_ciphers(self.nw.server.ssl_ciphers)
+                # Python does not allow setting ciphers on TLSv1.3, so have to force TLSv1.2 as the maximum
+                self.nw.server.ssl_context.maximum_version = ssl.TLSVersion.TLSv1_2
+            else:
+                # Support at least TLSv1.2+ ciphers, as some essential ones are removed by default in Python 3.10
+                self.nw.server.ssl_context.set_ciphers("HIGH")
+
+            if sabnzbd.cfg.allow_old_ssl_tls():
+                # Allow anything that the system has
+                self.nw.server.ssl_context.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+            else:
+                # We want a modern TLS (1.2 or higher), so we disallow older protocol versions (<= TLS 1.1)
+                self.nw.server.ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+
+        # Create socket and store fileno of the socket
+        self.sock: socket.socket | ssl.SSLSocket = socket.socket(self.addrinfo.family, self.addrinfo.type)
         self.fileno: int = self.sock.fileno()
 
         # Open the connection in a separate thread due to avoid blocking
@@ -320,16 +653,30 @@ class NNTP:
     def connect(self):
         """Start of connection, can be performed a-sync"""
         try:
-            # Wait only 15 seconds during server test
-            if self.nw.blocking:
-                self.sock.settimeout(15)
+            # Wait the defined timeout during connect and SSL-setup
+            self.sock.settimeout(self.nw.server.timeout)
 
             # Connect
-            self.sock.connect((self.host, self.nw.server.port))
-            self.sock.setblocking(self.nw.blocking)
+            if outgoing_nntp_ip := sabnzbd.cfg.outgoing_nntp_ip():
+                try:
+                    self.sock.bind((outgoing_nntp_ip, 0))
+                    socket_info = self.sock.getsockname()
+                    logging.debug(
+                        "%s@%s: Successfully bound to following ip address: %s at following port: %d",
+                        self.nw.thrdnum,
+                        self.nw.server.host,
+                        socket_info[0],
+                        socket_info[1],
+                    )
+                except socket.error:
+                    raise ConnectionError(f"Could not bind to outgoing interface {outgoing_nntp_ip}")
 
-            # Log SSL/TLS info
+            self.sock.connect(self.addrinfo.sockaddr)
+
+            # Secured or unsecured?
             if self.nw.server.ssl:
+                # Wrap socket and log SSL/TLS diagnostic info
+                self.sock = self.nw.server.ssl_context.wrap_socket(self.sock, server_hostname=self.nw.server.host)
                 logging.info(
                     "%s@%s: Connected using %s (%s)",
                     self.nw.thrdnum,
@@ -339,10 +686,16 @@ class NNTP:
                 )
                 self.nw.server.ssl_info = "%s (%s)" % (self.sock.version(), self.sock.cipher()[0])
 
-            # Now it's safe to add the socket to the list of active sockets
-            # Skip this step during server test
+            # Skip during server test
             if not self.nw.blocking:
-                sabnzbd.Downloader.add_socket(self.fileno, self.nw)
+                # Set to non-blocking mode
+                self.sock.setblocking(False)
+                # Only add to active sockets if it's not somehow already closing
+                # Locked, so it can't interleave with any of the Downloader "__nw" actions
+                with DOWNLOADER_LOCK:
+                    if not self.closed:
+                        self.nw.connected = True
+                        sabnzbd.Downloader.add_socket(self.nw)
         except OSError as e:
             self.error(e)
 
@@ -352,7 +705,7 @@ class NNTP:
             error = T("This server does not allow SSL on this port")
 
         # Catch certificate errors
-        if type(error) == ssl.CertificateError or "CERTIFICATE_VERIFY_FAILED" in raw_error_str:
+        if isinstance(error, ssl.CertificateError) or "CERTIFICATE_VERIFY_FAILED" in raw_error_str:
             # Log the raw message for debug purposes
             logging.info("Certificate error for host %s: %s", self.nw.server.host, raw_error_str)
 
@@ -362,7 +715,9 @@ class NNTP:
                     "Certificate hostname mismatch: the server hostname is not listed in the certificate. This is a server issue."
                 )
             elif "certificate verify failed" in raw_error_str:
-                raw_error_str = T("Certificate not valid. This is most probably a server issue.")
+                raw_error_str = T(
+                    "Certificate could not be validated. This could be a server issue or due to a locally injected certificate (for example by firewall or virus scanner). Try setting Certificate verification to Medium."
+                )
 
             # Reformat error and overwrite str-representation
             error_str = T("Server %s uses an untrusted certificate [%s]") % (self.nw.server.host, raw_error_str)
@@ -380,13 +735,41 @@ class NNTP:
         # Blocking = server-test, pass directly to display code
         if self.nw.blocking:
             raise socket.error(errno.ECONNREFUSED, str(error))
-        else:
-            msg = "Failed to connect: %s" % (str(error))
-            msg = "%s %s@%s:%s" % (msg, self.nw.thrdnum, self.host, self.nw.server.port)
+
+        # Ignore if the socket was already closed, resulting in errors
+        if not self.closed:
+            msg = T("Failed to connect: %s %s@%s:%s (%s)") % (
+                str(error),
+                self.nw.thrdnum,
+                self.nw.server.host,
+                self.nw.server.port,
+                self.addrinfo.canonname,
+            )
             self.error_msg = msg
             self.nw.server.next_busy_threads_check = 0
-            logging.info(msg)
+            if self.nw.server.warning == msg:
+                logging.info(msg)
+            else:
+                logging.warning(msg)
             self.nw.server.warning = msg
+            # No reset-warning needed, above logging is sufficient
+            sabnzbd.Downloader.reset_nw(self.nw, bad_connection=True)
+
+    @synchronized(DOWNLOADER_LOCK)
+    def close(self, send_quit: bool):
+        """Safely close socket.
+        Locked to match connect(), even though most likely the caller already holds the same lock."""
+        # Set status first, so any calls in connect/error are handled correctly
+        self.closed = True
+        self.write_buffer = b""
+        try:
+            if send_quit:
+                with suppress(socket.error):
+                    self.sock.sendall(b"QUIT\r\n")
+                    time.sleep(0.01)
+            self.sock.close()
+        except Exception as e:
+            logging.info("%s@%s: Failed to close socket (error=%s)", self.nw.thrdnum, self.nw.server.host, str(e))
 
     def __repr__(self):
-        return "<NNTP: %s:%s>" % (self.host, self.nw.server.port)
+        return "<NNTP: %s:%s>" % (self.addrinfo.canonname, self.nw.server.port)
